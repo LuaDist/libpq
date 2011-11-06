@@ -1,0 +1,10 @@
+--- This file is part of LuaDist project
+
+name = "libpq"
+version = "9.1.1"
+
+desc = "libpq is a connection library for PostgreSQL."
+author = "PostgreSQL"
+license = "PostgreSQL"
+url = "http://www.postgresql.org/"
+maintainer = "Peter Drahoš"
