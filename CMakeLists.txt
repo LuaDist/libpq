@@ -41,7 +41,7 @@ set ( SRC
 # Quick fix for the <net/if.h> check that fails on OSX
 if (APPLE)
   set(HAVE_NET_IF_H 1)
-elseif (MINGW)
+elseif (WIN32)
   #Minor configuration corrections
   set(HAVE_STRUCT_ADDRINFO 1)
   set(HAVE_STRUCT_SOCKADDR_STORAGE 1)
