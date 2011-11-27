@@ -24,18 +24,35 @@ set(MAXIMUM_ALIGNOF 8)
 
 # libpq sources
 set ( SRC 
-	src/port/chklocale.c 
-	src/port/inet_net_ntop.c 
-	src/port/noblock.c 
-	src/port/pgstrcasecmp.c 
-	src/port/thread.c
-
-	src/backend/libpq/ip.c 
-	src/backend/libpq/md5.c
-	src/backend/utils/mb/encnames.c 
-	src/backend/utils/mb/wchar.c
-	
-	src/interfaces/libpq/fe-connect.c
+  	src/interfaces/libpq/fe-auth.c
+  	src/interfaces/libpq/fe-protocol2.c
+  	src/interfaces/libpq/fe-protocol3.c
+  	src/interfaces/libpq/fe-connect.c
+  	src/interfaces/libpq/fe-exec.c
+  	src/interfaces/libpq/fe-lobj.c
+  	src/interfaces/libpq/fe-misc.c
+  	src/interfaces/libpq/fe-print.c
+  	src/interfaces/libpq/fe-secure.c
+  	src/interfaces/libpq/libpq-events.c
+  	src/interfaces/libpq/pqexpbuffer.c
+  	src/interfaces/libpq/pqsignal.c
+  	src/backend/libpq/md5.c
+  	src/backend/libpq/ip.c
+  	src/backend/utils/mb/encnames.c
+  	src/backend/utils/mb/wchar.c
+  	src/port/pgstrcasecmp.c
+  	src/port/thread.c
+  	src/port/inet_aton.c
+  	src/port/noblock.c
+  	src/port/chklocale.c
+  	src/port/inet_net_ntop.c
+  	src/port/getaddrinfo.c
+  	src/port/snprintf.c
+  	src/port/strlcpy.c
+  	src/port/dirmod.c
+  	src/port/open.c
+#  	src/port/crypt.c
+#  	src/port/dirent.c
 )
 
 # Quick fix for the <net/if.h> check that fails on OSX
@@ -54,43 +71,12 @@ elseif (WIN32)
   include_directories ( ${CMAKE_CURRENT_SOURCE_DIR}/src/include/port/win32 )
   #Additional libs needed on win32
   set(LIBS -lkernel32 -luser32 -ladvapi32 -lshfolder -lwsock32 -lws2_32 -lsecur32)
-  set(SRC 
-	src/interfaces/libpq/fe-auth.c
-	src/interfaces/libpq/fe-protocol2.c
-	src/interfaces/libpq/fe-protocol3.c
-	src/interfaces/libpq/fe-connect.c
-	src/interfaces/libpq/fe-exec.c
-	src/interfaces/libpq/fe-lobj.c
-	src/interfaces/libpq/fe-misc.c
-	src/interfaces/libpq/fe-print.c
-	src/interfaces/libpq/fe-secure.c
-	src/interfaces/libpq/libpq-events.c
-	src/interfaces/libpq/pqexpbuffer.c
-	src/interfaces/libpq/pqsignal.c
-	src/interfaces/libpq/win32.c
-	src/interfaces/libpq/pthread-win32.c
-
-	src/backend/libpq/md5.c
-	src/backend/libpq/ip.c
-	src/backend/utils/mb/encnames.c
-	src/backend/utils/mb/wchar.c
-
-	src/port/pgstrcasecmp.c
-	src/port/thread.c
-	src/port/inet_aton.c
-	src/port/crypt.c
-	src/port/noblock.c
-	src/port/chklocale.c
-	src/port/inet_net_ntop.c
-	src/port/getaddrinfo.c
-	src/port/snprintf.c
-	src/port/strlcpy.c
-#	src/port/dirent.c
-	src/port/dirmod.c
-	src/port/pgsleep.c
-	src/port/open.c
-	src/port/win32error.c
-	src/port/win32setlocale.c
+  set(SRC ${SRC}
+      	src/interfaces/libpq/win32.c
+      	src/interfaces/libpq/pthread-win32.c
+      	src/port/win32error.c
+      	src/port/win32setlocale.c
+      	src/port/pgsleep.c
   )
   configure_file ( ${CMAKE_CURRENT_SOURCE_DIR}/src/include/port/win32.h ${CMAKE_CURRENT_SOURCE_DIR}/src/include/pg_config_os.h )
 endif()
