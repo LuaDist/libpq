@@ -100,4 +100,9 @@ install_header (
   src/interfaces/libpq/libpq-int.h
   src/interfaces/libpq/pqexpbuffer.h
   src/include/postgres_ext.h
+  src/include/pg_config_manual.h
+)
+install_header (
+  src/include/libpq/libpq-fs.h
+  INTO libpq
 )
