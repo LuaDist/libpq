@@ -79,6 +79,8 @@ elseif (WIN32)
       	src/port/pgsleep.c
   )
   configure_file ( ${CMAKE_CURRENT_SOURCE_DIR}/src/include/port/win32.h ${CMAKE_CURRENT_SOURCE_DIR}/src/include/pg_config_os.h )
+else()
+  configure_file ( ${CMAKE_CURRENT_SOURCE_DIR}/src/include/port/linux.h ${CMAKE_CURRENT_SOURCE_DIR}/src/include/pg_config_os.h )
 endif()
 
 # Generate configured headers
