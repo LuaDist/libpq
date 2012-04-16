@@ -8,7 +8,7 @@
 # For now this build contains the bare minimum to get PostgreSQL running
 
 project ( libpq C CXX ) # CXX Required for configure
-cmake_minimum_required ( VERSION 2.8 )
+cmake_minimum_required ( VERSION 2.8.5 )
 include ( dist.cmake )
 include ( configure.cmake )
 
@@ -58,6 +58,9 @@ set ( SRC
 # Quick fix for the <net/if.h> check that fails on OSX
 if (APPLE)
   set(HAVE_NET_IF_H 1)
+elseif (CYGWIN)
+  set(SRC ${SRC} src/port/pgsleep.c)
+  configure_file ( ${CMAKE_CURRENT_SOURCE_DIR}/src/include/port/cygwin.h ${CMAKE_CURRENT_SOURCE_DIR}/src/include/pg_config_os.h )
 elseif (WIN32)
   #Minor configuration corrections
   set(HAVE_STRUCT_ADDRINFO 1)
@@ -68,7 +71,7 @@ elseif (WIN32)
   set(ENABLE_SSPI 0)
 
   add_definitions ( -DEXEC_BACKEND )
-  include_directories ( ${CMAKE_CURRENT_SOURCE_DIR}/src/include/port/win32 )
+  include_directories ( ${CMAKE_CURRENT_SOURCE_DIR}/src/include/port/ )
   #Additional libs needed on win32
   set(LIBS -lkernel32 -luser32 -ladvapi32 -lshfolder -lwsock32 -lws2_32 -lsecur32)
   set(SRC ${SRC}
@@ -78,8 +81,9 @@ elseif (WIN32)
       	src/port/win32setlocale.c
       	src/port/pgsleep.c
   )
+  
   configure_file ( ${CMAKE_CURRENT_SOURCE_DIR}/src/include/port/win32.h ${CMAKE_CURRENT_SOURCE_DIR}/src/include/pg_config_os.h )
-else()
+else() 
   configure_file ( ${CMAKE_CURRENT_SOURCE_DIR}/src/include/port/linux.h ${CMAKE_CURRENT_SOURCE_DIR}/src/include/pg_config_os.h )
 endif()
 
