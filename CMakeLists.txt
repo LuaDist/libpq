@@ -71,7 +71,10 @@ elseif (WIN32)
   set(ENABLE_SSPI 0)
 
   add_definitions ( -DEXEC_BACKEND )
-  include_directories ( ${CMAKE_CURRENT_SOURCE_DIR}/src/include/port/ )
+  include_directories ( 
+	${CMAKE_CURRENT_SOURCE_DIR}/src/include/port/ 
+	${CMAKE_CURRENT_SOURCE_DIR}/src/include/port/win32   
+  )
   #Additional libs needed on win32
   set(LIBS -lkernel32 -luser32 -ladvapi32 -lshfolder -lwsock32 -lws2_32 -lsecur32)
   set(SRC ${SRC}
