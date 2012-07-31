@@ -14,906 +14,683 @@
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #
 
-INCLUDE (CheckCSourceCompiles)
-INCLUDE (CheckCXXSourceCompiles)
-INCLUDE (CheckStructHasMember)
-INCLUDE (CheckLibraryExists)
-INCLUDE (CheckFunctionExists)
-INCLUDE (CheckCCompilerFlag)
-INCLUDE (CheckCSourceRuns)
-INCLUDE (CheckSymbolExists)
-
+include ( CheckCSourceCompiles )
+include ( CheckCXXSourceCompiles )
+include ( CheckStructHasMember )
+include ( CheckLibraryExists )
+include ( CheckFunctionExists )
+include ( CheckCCompilerFlag )
+include ( CheckCSourceRuns )
+include ( CheckSymbolExists )
 
 # WITH_PIC options.Not of much use, PIC is taken care of on platforms
 # where it makes sense anyway.
-IF(UNIX)
-  IF(APPLE)  
+if ( UNIX )
+  if ( APPLE )
     # OSX  executable are always PIC
-    SET(WITH_PIC ON)
-  ELSE()
-    OPTION(WITH_PIC "Generate PIC objects" OFF)
-    IF(WITH_PIC)
-      SET(CMAKE_C_FLAGS 
-        "${CMAKE_C_FLAGS} ${CMAKE_SHARED_LIBRARY_C_FLAGS}")
-      SET(CMAKE_CXX_FLAGS 
-        "${CMAKE_CXX_FLAGS} ${CMAKE_SHARED_LIBRARY_CXX_FLAGS}")
-    ENDIF()
-  ENDIF()
-ENDIF()
-
-
+    set ( WITH_PIC ON )
+  else ( )
+    option ( WITH_PIC "Generate PIC objects" OFF )
+    if ( WITH_PIC )
+      set ( CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${CMAKE_SHARED_LIBRARY_C_FLAGS}" )
+      set ( CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${CMAKE_SHARED_LIBRARY_CXX_FLAGS}" )
+    endif ( )
+  endif ( )
+endif ( )
 
 # System type affects version_compile_os variable 
-IF(NOT SYSTEM_TYPE)
-  IF(PLATFORM)
-    SET(SYSTEM_TYPE ${PLATFORM})
-  ELSE()
-    SET(SYSTEM_TYPE ${CMAKE_SYSTEM_NAME})
-  ENDIF()
-ENDIF()
-
+if ( NOT SYSTEM_TYPE )
+  if ( PLATFORM )
+    set ( SYSTEM_TYPE ${PLATFORM} )
+  else ( )
+    set ( SYSTEM_TYPE ${CMAKE_SYSTEM_NAME} )
+  endif ( )
+endif ( )
 
 # Always enable -Wall for gnu C/C++
-IF(CMAKE_COMPILER_IS_GNUCXX)
-  SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wno-unused-parameter")
-ENDIF()
-IF(CMAKE_COMPILER_IS_GNUCC)
-  SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall")
-ENDIF()
+if ( CMAKE_COMPILER_IS_GNUCXX )
+  set ( CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wno-unused-parameter" )
+endif ( )
+if ( CMAKE_COMPILER_IS_GNUCC )
+  set ( CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall" )
+endif ( )
 
-
-IF(CMAKE_COMPILER_IS_GNUCXX)
+if ( CMAKE_COMPILER_IS_GNUCXX )
   # MySQL "canonical" GCC flags. At least -fno-rtti flag affects
   # ABI and cannot be simply removed. 
-  SET(CMAKE_CXX_FLAGS 
-    "${CMAKE_CXX_FLAGS} -fno-implicit-templates -fno-exceptions -fno-rtti")
-  IF(CMAKE_CXX_FLAGS)
-    STRING(REGEX MATCH "fno-implicit-templates" NO_IMPLICIT_TEMPLATES
-      ${CMAKE_CXX_FLAGS})
-    IF (NO_IMPLICIT_TEMPLATES)
-      SET(HAVE_EXPLICIT_TEMPLATE_INSTANTIATION TRUE)
-    ENDIF()
-  ENDIF()
+  set ( CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-implicit-templates -fno-exceptions -fno-rtti" )
+  if ( CMAKE_CXX_FLAGS )
+    string ( REGEX MATCH "fno-implicit-templates" NO_IMPLICIT_TEMPLATES ${CMAKE_CXX_FLAGS} )
+    if ( NO_IMPLICIT_TEMPLATES )
+      set ( HAVE_EXPLICIT_TEMPLATE_INSTANTIATION TRUE )
+    endif ( )
+  endif ( )
 
-  IF (CMAKE_EXE_LINKER_FLAGS MATCHES " -static " 
-     OR CMAKE_EXE_LINKER_FLAGS MATCHES " -static$")
-     SET(HAVE_DLOPEN FALSE CACHE "Disable dlopen due to -static flag" FORCE)
-     SET(WITHOUT_DYNAMIC_PLUGINS TRUE)
-  ENDIF()
-ENDIF()
+  if ( CMAKE_EXE_LINKER_FLAGS MATCHES " -static " OR CMAKE_EXE_LINKER_FLAGS MATCHES 
+    " -static$" )
+    set ( HAVE_DLOPEN FALSE CACHE "Disable dlopen due to -static flag" FORCE )
+    set ( WITHOUT_DYNAMIC_PLUGINS TRUE )
+  endif ( )
+endif ( )
 
-IF(WITHOUT_DYNAMIC_PLUGINS)
-  MESSAGE("Dynamic plugins are disabled.")
-ENDIF(WITHOUT_DYNAMIC_PLUGINS)
+if ( WITHOUT_DYNAMIC_PLUGINS )
+  message ( "Dynamic plugins are disabled." )
+endif ( WITHOUT_DYNAMIC_PLUGINS )
 
 # Large files, common flag
-SET(_LARGEFILE_SOURCE  1)
+set ( _LARGEFILE_SOURCE 1 )
 
 # If finds the size of a type, set SIZEOF_&lt;type&gt; and HAVE_&lt;type&gt;
-FUNCTION(MY_CHECK_TYPE_SIZE type defbase)
-  CHECK_TYPE_SIZE("${type}" SIZEOF_${defbase})
-  IF(SIZEOF_${defbase})
-    SET(HAVE_${defbase} 1 PARENT_SCOPE)
-  ENDIF()
-ENDFUNCTION()
+function ( MY_CHECK_TYPE_SIZE type defbase )
+  check_type_size ( "${type}" SIZEOF_${defbase} )
+  if ( SIZEOF_${defbase} )
+    set ( HAVE_${defbase} 1 PARENT_SCOPE )
+  endif ( )
+endfunction ( )
 
 # Same for structs, setting HAVE_STRUCT_&lt;name&gt; instead
-FUNCTION(MY_CHECK_STRUCT_SIZE type defbase)
-  CHECK_TYPE_SIZE("struct ${type}" SIZEOF_${defbase})
-  IF(SIZEOF_${defbase})
-    SET(HAVE_STRUCT_${defbase} 1 PARENT_SCOPE)
-  ENDIF()
-ENDFUNCTION()
+function ( MY_CHECK_STRUCT_SIZE type defbase )
+  check_type_size ( "struct ${type}" SIZEOF_${defbase} )
+  if ( SIZEOF_${defbase} )
+    set ( HAVE_STRUCT_${defbase} 1 PARENT_SCOPE )
+  endif ( )
+endfunction ( )
 
 # Searches function in libraries
 # if function is found, sets output parameter result to the name of the library
 # if function is found in libc, result will be empty 
-FUNCTION(MY_SEARCH_LIBS func libs result)
-  IF(${${result}})
+function ( MY_SEARCH_LIBS func libs result )
+  if ( ${${result}} )
     # Library is already found or was predefined
-    RETURN()
-  ENDIF()
-  CHECK_FUNCTION_EXISTS(${func} HAVE_${func}_IN_LIBC)
-  IF(HAVE_${func}_IN_LIBC)
-    SET(${result} "" PARENT_SCOPE)
-    RETURN()
-  ENDIF()
-  FOREACH(lib  ${libs})
-    CHECK_LIBRARY_EXISTS(${lib} ${func} "" HAVE_${func}_IN_${lib}) 
-    IF(HAVE_${func}_IN_${lib})
-      SET(${result} ${lib} PARENT_SCOPE)
-      SET(HAVE_${result} 1 PARENT_SCOPE)
-      RETURN()
-    ENDIF()
-  ENDFOREACH()
-ENDFUNCTION()
+    return ( )
+  endif ( )
+  check_function_exists ( ${func} HAVE_${func}_IN_LIBC )
+  if ( HAVE_${func}_IN_LIBC )
+    set ( ${result} "" PARENT_SCOPE )
+    return ( )
+  endif ( )
+  foreach ( lib ${libs} )
+  check_library_exists ( ${lib} ${func} "" HAVE_${func}_IN_${lib} )
+  if ( HAVE_${func}_IN_${lib} )
+    set ( ${result} ${lib} PARENT_SCOPE )
+    set ( HAVE_${result} 1 PARENT_SCOPE )
+    return ( )
+  endif ( )
+  endforeach ( )
+endfunction ( )
 
 # Find out which libraries to use.
-IF(UNIX)
-  MY_SEARCH_LIBS(floor m LIBM)
-  IF(NOT LIBM)
-    MY_SEARCH_LIBS(__infinity m LIBM)
-  ENDIF()
-  MY_SEARCH_LIBS(gethostbyname_r  "nsl_r;nsl" LIBNSL)
-  MY_SEARCH_LIBS(bind "bind;socket" LIBBIND)
-  MY_SEARCH_LIBS(crypt crypt LIBCRYPT)
-  MY_SEARCH_LIBS(setsockopt socket LIBSOCKET)
-  MY_SEARCH_LIBS(dlopen dl LIBDL)
-  MY_SEARCH_LIBS(sched_yield rt LIBRT)
-  IF(NOT LIBRT)
-    MY_SEARCH_LIBS(clock_gettime rt LIBRT)
-  ENDIF()
-  FIND_PACKAGE(Threads)
+if ( UNIX )
+  my_search_libs ( floor m LIBM )
+  if ( NOT LIBM )
+    my_search_libs ( __infinity m LIBM )
+  endif ( )
+  my_search_libs ( gethostbyname_r "nsl_r;nsl" LIBNSL )
+  my_search_libs ( bind "bind;socket" LIBBIND )
+  my_search_libs ( crypt crypt LIBCRYPT )
+  my_search_libs ( setsockopt socket LIBSOCKET )
+  my_search_libs ( dlopen dl LIBDL )
+  my_search_libs ( sched_yield rt LIBRT )
+  if ( NOT LIBRT )
+    my_search_libs ( clock_gettime rt LIBRT )
+  endif ( )
+  find_package ( Threads )
 
-  SET(CMAKE_REQUIRED_LIBRARIES 
-    ${LIBM} ${LIBNSL} ${LIBBIND} ${LIBCRYPT} ${LIBSOCKET} ${LIBDL} ${CMAKE_THREAD_LIBS_INIT} ${LIBRT})
+  set ( CMAKE_REQUIRED_LIBRARIES ${LIBM} ${LIBNSL} ${LIBBIND} ${LIBCRYPT} ${LIBSOCKET} 
+    ${LIBDL} ${CMAKE_THREAD_LIBS_INIT} ${LIBRT} )
 
-  IF(CMAKE_REQUIRED_LIBRARIES)
-  	LIST(REMOVE_DUPLICATES CMAKE_REQUIRED_LIBRARIES)
-  ENDIF()
+  if ( CMAKE_REQUIRED_LIBRARIES )
+    list ( REMOVE_DUPLICATES CMAKE_REQUIRED_LIBRARIES )
+  endif ( )
 
-  LINK_LIBRARIES(${CMAKE_THREAD_LIBS_INIT})
-  
-  OPTION(WITH_LIBWRAP "Compile with tcp wrappers support" OFF)
-  IF(WITH_LIBWRAP)
-    SET(SAVE_CMAKE_REQUIRED_LIBRARIES ${CMAKE_REQUIRED_LIBRARIES})
-    SET(CMAKE_REQUIRED_LIBRARIES ${CMAKE_REQUIRED_LIBRARIES} wrap)
-    CHECK_C_SOURCE_COMPILES(
-    "
-    #include &lt;tcpd.h&gt;
-    int allow_severity = 0;
-    int deny_severity  = 0;
-    int main()
-    {
-      hosts_access(0);
-    }"
-    HAVE_LIBWRAP)
-    SET(CMAKE_REQUIRED_LIBRARIES ${SAVE_CMAKE_REQUIRED_LIBRARIES})
-    IF(HAVE_LIBWRAP)
-      SET(MYSYS_LIBWRAP_SOURCE  ${CMAKE_SOURCE_DIR}/mysys/my_libwrap.c)
-      SET(LIBWRAP "wrap")
-    ENDIF()
-  ENDIF()
-ENDIF()
+  link_libraries ( ${CMAKE_THREAD_LIBS_INIT} )
+  option ( WITH_LIBWRAP "Compile with tcp wrappers support" OFF )
+  if ( WITH_LIBWRAP )
+    set ( SAVE_CMAKE_REQUIRED_LIBRARIES ${CMAKE_REQUIRED_LIBRARIES} )
+    set ( CMAKE_REQUIRED_LIBRARIES ${CMAKE_REQUIRED_LIBRARIES} wrap )
+    check_c_source_compiles ( " #include &lt;tcpd.h&gt; int allow_severity = 0; int deny_severity = 0; int main() { hosts_access(0); }" 
+      HAVE_LIBWRAP )
+    set ( CMAKE_REQUIRED_LIBRARIES ${SAVE_CMAKE_REQUIRED_LIBRARIES} )
+    if ( HAVE_LIBWRAP )
+      set ( MYSYS_LIBWRAP_SOURCE ${CMAKE_SOURCE_DIR}/mysys/my_libwrap.c )
+      set ( LIBWRAP "wrap" )
+    endif ( )
+  endif ( )
+endif ( )
 
 #
 # Tests for header files
 #
-INCLUDE (CheckIncludeFiles)
+include ( CheckIncludeFiles )
 
-CHECK_INCLUDE_FILES ("stdlib.h;stdarg.h;string.h;float.h" STDC_HEADERS)
-CHECK_INCLUDE_FILES (sys/types.h HAVE_SYS_TYPES_H)
-CHECK_INCLUDE_FILES (alloca.h HAVE_ALLOCA_H)
-CHECK_INCLUDE_FILES (aio.h HAVE_AIO_H)
-CHECK_INCLUDE_FILES (arpa/inet.h HAVE_ARPA_INET_H)
-CHECK_INCLUDE_FILES (crypt.h HAVE_CRYPT_H)
-CHECK_INCLUDE_FILES (cxxabi.h HAVE_CXXABI_H)
-CHECK_INCLUDE_FILES (dirent.h HAVE_DIRENT_H)
-CHECK_INCLUDE_FILES (dlfcn.h HAVE_DLFCN_H)
-CHECK_INCLUDE_FILES (execinfo.h HAVE_EXECINFO_H)
-CHECK_INCLUDE_FILES (fcntl.h HAVE_FCNTL_H)
-CHECK_INCLUDE_FILES (fenv.h HAVE_FENV_H)
-CHECK_INCLUDE_FILES (float.h HAVE_FLOAT_H)
-CHECK_INCLUDE_FILES (floatingpoint.h HAVE_FLOATINGPOINT_H)
-CHECK_INCLUDE_FILES (fpu_control.h HAVE_FPU_CONTROL_H)
-CHECK_INCLUDE_FILES (grp.h HAVE_GRP_H)
-CHECK_INCLUDE_FILES (ieeefp.h HAVE_IEEEFP_H)
-CHECK_INCLUDE_FILES (inttypes.h HAVE_INTTYPES_H)
-CHECK_INCLUDE_FILES (langinfo.h HAVE_LANGINFO_H)
-CHECK_INCLUDE_FILES (limits.h HAVE_LIMITS_H)
-CHECK_INCLUDE_FILES (locale.h HAVE_LOCALE_H)
-CHECK_INCLUDE_FILES (malloc.h HAVE_MALLOC_H)
-CHECK_INCLUDE_FILES (memory.h HAVE_MEMORY_H)
-CHECK_INCLUDE_FILES (ndir.h HAVE_NDIR_H)
-CHECK_INCLUDE_FILES (netinet HAVE_NETINET_IN_H)
-CHECK_INCLUDE_FILES (paths.h HAVE_PATHS_H)
-CHECK_INCLUDE_FILES (port.h HAVE_PORT_H)
-CHECK_INCLUDE_FILES (poll.h HAVE_POLL_H)
-CHECK_INCLUDE_FILES (pwd.h HAVE_PWD_H)
-CHECK_INCLUDE_FILES (sched.h HAVE_SCHED_H)
-CHECK_INCLUDE_FILES (select.h HAVE_SELECT_H)
-CHECK_INCLUDE_FILES (semaphore.h HAVE_SEMAPHORE_H)
-CHECK_INCLUDE_FILES ("sys/types.h;sys/dir.h" HAVE_SYS_DIR_H)
-CHECK_INCLUDE_FILES (sys/ndir.h HAVE_SYS_NDIR_H)
-CHECK_INCLUDE_FILES (sys/pte.h HAVE_SYS_PTE_H)
-CHECK_INCLUDE_FILES (stddef.h HAVE_STDDEF_H)
-CHECK_INCLUDE_FILES (stdint.h HAVE_STDINT_H)
-CHECK_INCLUDE_FILES (stdlib.h HAVE_STDLIB_H)
-CHECK_INCLUDE_FILES (strings.h HAVE_STRINGS_H)
-CHECK_INCLUDE_FILES (string.h HAVE_STRING_H)
-CHECK_INCLUDE_FILES (synch.h HAVE_SYNCH_H)
-CHECK_INCLUDE_FILES (sysent.h HAVE_SYSENT_H)
-CHECK_INCLUDE_FILES (sys/cdefs.h HAVE_SYS_CDEFS_H)
-CHECK_INCLUDE_FILES (sys/file.h HAVE_SYS_FILE_H)
-CHECK_INCLUDE_FILES (sys/fpu.h HAVE_SYS_FPU_H)
-CHECK_INCLUDE_FILES (sys/ioctl.h HAVE_SYS_IOCTL_H)
-CHECK_INCLUDE_FILES (sys/ipc.h HAVE_SYS_IPC_H)
-CHECK_INCLUDE_FILES (sys/malloc.h HAVE_SYS_MALLOC_H)
-CHECK_INCLUDE_FILES (sys/mman.h HAVE_SYS_MMAN_H)
-CHECK_INCLUDE_FILES (sys/prctl.h HAVE_SYS_PRCTL_H)
-CHECK_INCLUDE_FILES (sys/resource.h HAVE_SYS_RESOURCE_H)
-CHECK_INCLUDE_FILES (sys/select.h HAVE_SYS_SELECT_H)
-CHECK_INCLUDE_FILES (sys/shm.h HAVE_SYS_SHM_H)
-CHECK_INCLUDE_FILES (sys/socket.h HAVE_SYS_SOCKET_H)
-CHECK_INCLUDE_FILES (sys/stat.h HAVE_SYS_STAT_H)
-CHECK_INCLUDE_FILES (sys/stream.h HAVE_SYS_STREAM_H)
-CHECK_INCLUDE_FILES (sys/termcap.h HAVE_SYS_TERMCAP_H)
-CHECK_INCLUDE_FILES ("time.h;sys/timeb.h" HAVE_SYS_TIMEB_H)
-CHECK_INCLUDE_FILES ("curses.h;term.h" HAVE_TERM_H)
-CHECK_INCLUDE_FILES (asm/termbits.h HAVE_ASM_TERMBITS_H)
-CHECK_INCLUDE_FILES (termbits.h HAVE_TERMBITS_H)
-CHECK_INCLUDE_FILES (termios.h HAVE_TERMIOS_H)
-CHECK_INCLUDE_FILES (termio.h HAVE_TERMIO_H)
-CHECK_INCLUDE_FILES (termcap.h HAVE_TERMCAP_H)
-CHECK_INCLUDE_FILES (unistd.h HAVE_UNISTD_H)
-CHECK_INCLUDE_FILES (utime.h HAVE_UTIME_H)
-CHECK_INCLUDE_FILES (varargs.h HAVE_VARARGS_H)
-CHECK_INCLUDE_FILES (sys/time.h HAVE_SYS_TIME_H)
-CHECK_INCLUDE_FILES (sys/utime.h HAVE_SYS_UTIME_H)
-CHECK_INCLUDE_FILES (sys/wait.h HAVE_SYS_WAIT_H)
-CHECK_INCLUDE_FILES (sys/param.h HAVE_SYS_PARAM_H)
-CHECK_INCLUDE_FILES (sys/vadvise.h HAVE_SYS_VADVISE_H)
-CHECK_INCLUDE_FILES (fnmatch.h HAVE_FNMATCH_H)
-CHECK_INCLUDE_FILES (stdarg.h  HAVE_STDARG_H)
-CHECK_INCLUDE_FILES ("stdlib.h;sys/un.h" HAVE_SYS_UN_H)
-CHECK_INCLUDE_FILES (vis.h HAVE_VIS_H)
-CHECK_INCLUDE_FILES (wchar.h HAVE_WCHAR_H)
-CHECK_INCLUDE_FILES (wctype.h HAVE_WCTYPE_H)
-CHECK_INCLUDE_FILES (net/if.h HAVE_NET_IF_H)
+check_include_files ( "stdlib.h;stdarg.h;string.h;float.h" STDC_HEADERS )
+check_include_files ( sys/types.h HAVE_SYS_TYPES_H )
+check_include_files ( alloca.h HAVE_ALLOCA_H )
+check_include_files ( aio.h HAVE_AIO_H )
+check_include_files ( arpa/inet.h HAVE_ARPA_INET_H )
+check_include_files ( crypt.h HAVE_CRYPT_H )
+check_include_files ( cxxabi.h HAVE_CXXABI_H )
+check_include_files ( dirent.h HAVE_DIRENT_H )
+check_include_files ( dlfcn.h HAVE_DLFCN_H )
+check_include_files ( execinfo.h HAVE_EXECINFO_H )
+check_include_files ( fcntl.h HAVE_FCNTL_H )
+check_include_files ( fenv.h HAVE_FENV_H )
+check_include_files ( float.h HAVE_FLOAT_H )
+check_include_files ( floatingpoint.h HAVE_FLOATINGPOINT_H )
+check_include_files ( fpu_control.h HAVE_FPU_CONTROL_H )
+check_include_files ( grp.h HAVE_GRP_H )
+check_include_files ( ieeefp.h HAVE_IEEEFP_H )
+check_include_files ( inttypes.h HAVE_INTTYPES_H )
+check_include_files ( langinfo.h HAVE_LANGINFO_H )
+check_include_files ( limits.h HAVE_LIMITS_H )
+check_include_files ( locale.h HAVE_LOCALE_H )
+check_include_files ( malloc.h HAVE_MALLOC_H )
+check_include_files ( memory.h HAVE_MEMORY_H )
+check_include_files ( ndir.h HAVE_NDIR_H )
+check_include_files ( netinet HAVE_NETINET_IN_H )
+check_include_files ( paths.h HAVE_PATHS_H )
+check_include_files ( port.h HAVE_PORT_H )
+check_include_files ( poll.h HAVE_POLL_H )
+check_include_files ( pwd.h HAVE_PWD_H )
+check_include_files ( sched.h HAVE_SCHED_H )
+check_include_files ( select.h HAVE_SELECT_H )
+check_include_files ( semaphore.h HAVE_SEMAPHORE_H )
+check_include_files ( "sys/types.h;sys/dir.h" HAVE_SYS_DIR_H )
+check_include_files ( sys/ndir.h HAVE_SYS_NDIR_H )
+check_include_files ( sys/pte.h HAVE_SYS_PTE_H )
+check_include_files ( stddef.h HAVE_STDDEF_H )
+check_include_files ( stdint.h HAVE_STDINT_H )
+check_include_files ( stdlib.h HAVE_STDLIB_H )
+check_include_files ( strings.h HAVE_STRINGS_H )
+check_include_files ( string.h HAVE_STRING_H )
+check_include_files ( synch.h HAVE_SYNCH_H )
+check_include_files ( sysent.h HAVE_SYSENT_H )
+check_include_files ( sys/cdefs.h HAVE_SYS_CDEFS_H )
+check_include_files ( sys/file.h HAVE_SYS_FILE_H )
+check_include_files ( sys/fpu.h HAVE_SYS_FPU_H )
+check_include_files ( sys/ioctl.h HAVE_SYS_IOCTL_H )
+check_include_files ( sys/ipc.h HAVE_SYS_IPC_H )
+check_include_files ( sys/malloc.h HAVE_SYS_MALLOC_H )
+check_include_files ( sys/mman.h HAVE_SYS_MMAN_H )
+check_include_files ( sys/prctl.h HAVE_SYS_PRCTL_H )
+check_include_files ( sys/resource.h HAVE_SYS_RESOURCE_H )
+check_include_files ( sys/select.h HAVE_SYS_SELECT_H )
+check_include_files ( sys/shm.h HAVE_SYS_SHM_H )
+check_include_files ( sys/socket.h HAVE_SYS_SOCKET_H )
+check_include_files ( sys/stat.h HAVE_SYS_STAT_H )
+check_include_files ( sys/stream.h HAVE_SYS_STREAM_H )
+check_include_files ( sys/termcap.h HAVE_SYS_TERMCAP_H )
+check_include_files ( "time.h;sys/timeb.h" HAVE_SYS_TIMEB_H )
+check_include_files ( "curses.h;term.h" HAVE_TERM_H )
+check_include_files ( asm/termbits.h HAVE_ASM_TERMBITS_H )
+check_include_files ( termbits.h HAVE_TERMBITS_H )
+check_include_files ( termios.h HAVE_TERMIOS_H )
+check_include_files ( termio.h HAVE_TERMIO_H )
+check_include_files ( termcap.h HAVE_TERMCAP_H )
+check_include_files ( unistd.h HAVE_UNISTD_H )
+check_include_files ( utime.h HAVE_UTIME_H )
+check_include_files ( varargs.h HAVE_VARARGS_H )
+check_include_files ( sys/time.h HAVE_SYS_TIME_H )
+check_include_files ( sys/utime.h HAVE_SYS_UTIME_H )
+check_include_files ( sys/wait.h HAVE_SYS_WAIT_H )
+check_include_files ( sys/param.h HAVE_SYS_PARAM_H )
+check_include_files ( sys/vadvise.h HAVE_SYS_VADVISE_H )
+check_include_files ( fnmatch.h HAVE_FNMATCH_H )
+check_include_files ( stdarg.h HAVE_STDARG_H )
+check_include_files ( "stdlib.h;sys/un.h" HAVE_SYS_UN_H )
+check_include_files ( vis.h HAVE_VIS_H )
+check_include_files ( wchar.h HAVE_WCHAR_H )
+check_include_files ( wctype.h HAVE_WCTYPE_H )
+check_include_files ( net/if.h HAVE_NET_IF_H )
 
-IF(HAVE_SYS_STREAM_H)
+if ( HAVE_SYS_STREAM_H )
   # Needs sys/stream.h on Solaris
-  CHECK_INCLUDE_FILES ("sys/stream.h;sys/ptem.h" HAVE_SYS_PTEM_H)
-ELSE()
-  CHECK_INCLUDE_FILES (sys/ptem.h HAVE_SYS_PTEM_H)
-ENDIF()
+  check_include_files ( "sys/stream.h;sys/ptem.h" HAVE_SYS_PTEM_H )
+else ( )
+  check_include_files ( sys/ptem.h HAVE_SYS_PTEM_H )
+endif ( )
 
 # Figure out threading library
 #
-FIND_PACKAGE (Threads)
+find_package ( Threads )
 
 #
 # Tests for functions
 #
 #CHECK_FUNCTION_EXISTS (aiowait HAVE_AIOWAIT)
-CHECK_FUNCTION_EXISTS (aio_read HAVE_AIO_READ)
-CHECK_FUNCTION_EXISTS (alarm HAVE_ALARM)
-SET(HAVE_ALLOCA 1)
-CHECK_FUNCTION_EXISTS (backtrace HAVE_BACKTRACE)
-CHECK_FUNCTION_EXISTS (backtrace_symbols HAVE_BACKTRACE_SYMBOLS)
-CHECK_FUNCTION_EXISTS (backtrace_symbols_fd HAVE_BACKTRACE_SYMBOLS_FD)
-CHECK_FUNCTION_EXISTS (printstack HAVE_PRINTSTACK)
-CHECK_FUNCTION_EXISTS (bfill HAVE_BFILL)
-CHECK_FUNCTION_EXISTS (bmove HAVE_BMOVE)
-CHECK_FUNCTION_EXISTS (bsearch HAVE_BSEARCH)
-CHECK_FUNCTION_EXISTS (index HAVE_INDEX)
-CHECK_FUNCTION_EXISTS (bzero HAVE_BZERO)
-CHECK_FUNCTION_EXISTS (clock_gettime HAVE_CLOCK_GETTIME)
-CHECK_FUNCTION_EXISTS (cuserid HAVE_CUSERID)
-CHECK_FUNCTION_EXISTS (directio HAVE_DIRECTIO)
-CHECK_FUNCTION_EXISTS (_doprnt HAVE_DOPRNT)
-CHECK_FUNCTION_EXISTS (flockfile HAVE_FLOCKFILE)
-CHECK_FUNCTION_EXISTS (ftruncate HAVE_FTRUNCATE)
-CHECK_FUNCTION_EXISTS (getline HAVE_GETLINE)
-CHECK_FUNCTION_EXISTS (compress HAVE_COMPRESS)
-CHECK_FUNCTION_EXISTS (crypt HAVE_CRYPT)
-CHECK_FUNCTION_EXISTS (dlerror HAVE_DLERROR)
-CHECK_FUNCTION_EXISTS (dlopen HAVE_DLOPEN)
-CHECK_FUNCTION_EXISTS (fchmod HAVE_FCHMOD)
-CHECK_FUNCTION_EXISTS (fcntl HAVE_FCNTL)
-CHECK_FUNCTION_EXISTS (fconvert HAVE_FCONVERT)
-CHECK_FUNCTION_EXISTS (fdatasync HAVE_FDATASYNC)
-CHECK_SYMBOL_EXISTS(fdatasync "unistd.h" HAVE_DECL_FDATASYNC)
-CHECK_FUNCTION_EXISTS (fesetround HAVE_FESETROUND)
-CHECK_FUNCTION_EXISTS (fpsetmask HAVE_FPSETMASK)
-CHECK_FUNCTION_EXISTS (fseeko HAVE_FSEEKO)
-CHECK_FUNCTION_EXISTS (fsync HAVE_FSYNC)
-CHECK_FUNCTION_EXISTS (getcwd HAVE_GETCWD)
-CHECK_FUNCTION_EXISTS (gethostbyaddr_r HAVE_GETHOSTBYADDR_R)
-CHECK_FUNCTION_EXISTS (gethostbyname_r HAVE_GETHOSTBYNAME_R)
-CHECK_FUNCTION_EXISTS (gethrtime HAVE_GETHRTIME)
-CHECK_FUNCTION_EXISTS (getnameinfo HAVE_GETNAMEINFO)
-CHECK_FUNCTION_EXISTS (getpass HAVE_GETPASS)
-CHECK_FUNCTION_EXISTS (getpassphrase HAVE_GETPASSPHRASE)
-CHECK_FUNCTION_EXISTS (getpwnam HAVE_GETPWNAM)
-CHECK_FUNCTION_EXISTS (getpwuid HAVE_GETPWUID)
-CHECK_FUNCTION_EXISTS (getrlimit HAVE_GETRLIMIT)
-CHECK_FUNCTION_EXISTS (getrusage HAVE_GETRUSAGE)
-CHECK_FUNCTION_EXISTS (getwd HAVE_GETWD)
-CHECK_FUNCTION_EXISTS (gmtime_r HAVE_GMTIME_R)
-CHECK_FUNCTION_EXISTS (initgroups HAVE_INITGROUPS)
-CHECK_FUNCTION_EXISTS (issetugid HAVE_ISSETUGID)
-CHECK_FUNCTION_EXISTS (ldiv HAVE_LDIV)
-CHECK_FUNCTION_EXISTS (localtime_r HAVE_LOCALTIME_R)
-CHECK_FUNCTION_EXISTS (longjmp HAVE_LONGJMP)
-CHECK_FUNCTION_EXISTS (lstat HAVE_LSTAT)
-CHECK_FUNCTION_EXISTS (madvise HAVE_MADVISE)
-CHECK_FUNCTION_EXISTS (mallinfo HAVE_MALLINFO)
-CHECK_FUNCTION_EXISTS (memcpy HAVE_MEMCPY)
-CHECK_FUNCTION_EXISTS (memmove HAVE_MEMMOVE)
-CHECK_FUNCTION_EXISTS (mkstemp HAVE_MKSTEMP)
-CHECK_FUNCTION_EXISTS (mlock HAVE_MLOCK)
-CHECK_FUNCTION_EXISTS (mlockall HAVE_MLOCKALL)
-CHECK_FUNCTION_EXISTS (mmap HAVE_MMAP)
-CHECK_FUNCTION_EXISTS (mmap64 HAVE_MMAP64)
-CHECK_FUNCTION_EXISTS (perror HAVE_PERROR)
-CHECK_FUNCTION_EXISTS (poll HAVE_POLL)
-CHECK_FUNCTION_EXISTS (port_create HAVE_PORT_CREATE)
-CHECK_FUNCTION_EXISTS (posix_fallocate HAVE_POSIX_FALLOCATE)
-CHECK_FUNCTION_EXISTS (pread HAVE_PREAD)
-CHECK_FUNCTION_EXISTS (pthread_attr_create HAVE_PTHREAD_ATTR_CREATE)
-CHECK_FUNCTION_EXISTS (pthread_attr_getstacksize HAVE_PTHREAD_ATTR_GETSTACKSIZE)
-CHECK_FUNCTION_EXISTS (pthread_attr_setscope HAVE_PTHREAD_ATTR_SETSCOPE)
-CHECK_FUNCTION_EXISTS (pthread_attr_setstacksize HAVE_PTHREAD_ATTR_SETSTACKSIZE)
-CHECK_FUNCTION_EXISTS (pthread_condattr_create HAVE_PTHREAD_CONDATTR_CREATE)
-CHECK_FUNCTION_EXISTS (pthread_condattr_setclock HAVE_PTHREAD_CONDATTR_SETCLOCK)
-CHECK_FUNCTION_EXISTS (pthread_init HAVE_PTHREAD_INIT)
-CHECK_FUNCTION_EXISTS (pthread_key_delete HAVE_PTHREAD_KEY_DELETE)
-CHECK_FUNCTION_EXISTS (pthread_rwlock_rdlock HAVE_PTHREAD_RWLOCK_RDLOCK)
-CHECK_FUNCTION_EXISTS (pthread_sigmask HAVE_PTHREAD_SIGMASK)
-CHECK_FUNCTION_EXISTS (pthread_threadmask HAVE_PTHREAD_THREADMASK)
-CHECK_FUNCTION_EXISTS (pthread_yield_np HAVE_PTHREAD_YIELD_NP)
-CHECK_FUNCTION_EXISTS (putenv HAVE_PUTENV)
-CHECK_FUNCTION_EXISTS (readdir_r HAVE_READDIR_R)
-CHECK_FUNCTION_EXISTS (readlink HAVE_READLINK)
-CHECK_FUNCTION_EXISTS (re_comp HAVE_RE_COMP)
-CHECK_FUNCTION_EXISTS (regcomp HAVE_REGCOMP)
-CHECK_FUNCTION_EXISTS (realpath HAVE_REALPATH)
-CHECK_FUNCTION_EXISTS (rename HAVE_RENAME)
-CHECK_FUNCTION_EXISTS (rwlock_init HAVE_RWLOCK_INIT)
-CHECK_FUNCTION_EXISTS (sched_yield HAVE_SCHED_YIELD)
-CHECK_FUNCTION_EXISTS (setenv HAVE_SETENV)
-CHECK_FUNCTION_EXISTS (setlocale HAVE_SETLOCALE)
-CHECK_FUNCTION_EXISTS (setfd HAVE_SETFD)
-CHECK_FUNCTION_EXISTS (sigaction HAVE_SIGACTION)
-CHECK_FUNCTION_EXISTS (sigthreadmask HAVE_SIGTHREADMASK)
-CHECK_FUNCTION_EXISTS (sigwait HAVE_SIGWAIT)
-CHECK_FUNCTION_EXISTS (sigaddset HAVE_SIGADDSET)
-CHECK_FUNCTION_EXISTS (sigemptyset HAVE_SIGEMPTYSET)
-CHECK_FUNCTION_EXISTS (sighold HAVE_SIGHOLD) 
-CHECK_FUNCTION_EXISTS (sigset HAVE_SIGSET)
-CHECK_FUNCTION_EXISTS (sleep HAVE_SLEEP)
-CHECK_FUNCTION_EXISTS (snprintf HAVE_SNPRINTF)
-CHECK_FUNCTION_EXISTS (stpcpy HAVE_STPCPY)
-CHECK_FUNCTION_EXISTS (strcoll HAVE_STRCOLL)
-CHECK_FUNCTION_EXISTS (strerror HAVE_STRERROR)
-CHECK_FUNCTION_EXISTS (strlcpy HAVE_STRLCPY)
-CHECK_FUNCTION_EXISTS (strnlen HAVE_STRNLEN)
-CHECK_FUNCTION_EXISTS (strlcat HAVE_STRLCAT)
-CHECK_FUNCTION_EXISTS (strsignal HAVE_STRSIGNAL)
-CHECK_FUNCTION_EXISTS (fgetln HAVE_FGETLN)
-CHECK_FUNCTION_EXISTS (strpbrk HAVE_STRPBRK)
-CHECK_FUNCTION_EXISTS (strsep HAVE_STRSEP)
-CHECK_FUNCTION_EXISTS (strstr HAVE_STRSTR)
-CHECK_FUNCTION_EXISTS (strtok_r HAVE_STRTOK_R)
-CHECK_FUNCTION_EXISTS (strtol HAVE_STRTOL)
-CHECK_FUNCTION_EXISTS (strtoll HAVE_STRTOLL)
-CHECK_FUNCTION_EXISTS (strtoul HAVE_STRTOUL)
-CHECK_FUNCTION_EXISTS (strtoull HAVE_STRTOULL)
-CHECK_FUNCTION_EXISTS (strcasecmp HAVE_STRCASECMP)
-CHECK_FUNCTION_EXISTS (strncasecmp HAVE_STRNCASECMP)
-CHECK_FUNCTION_EXISTS (strdup HAVE_STRDUP)
-CHECK_FUNCTION_EXISTS (shmat HAVE_SHMAT) 
-CHECK_FUNCTION_EXISTS (shmctl HAVE_SHMCTL)
-CHECK_FUNCTION_EXISTS (shmdt HAVE_SHMDT)
-CHECK_FUNCTION_EXISTS (shmget HAVE_SHMGET)
-CHECK_FUNCTION_EXISTS (tell HAVE_TELL)
-CHECK_FUNCTION_EXISTS (tempnam HAVE_TEMPNAM)
-CHECK_FUNCTION_EXISTS (thr_setconcurrency HAVE_THR_SETCONCURRENCY)
-CHECK_FUNCTION_EXISTS (thr_yield HAVE_THR_YIELD)
-CHECK_FUNCTION_EXISTS (vasprintf HAVE_VASPRINTF)
-CHECK_FUNCTION_EXISTS (vsnprintf HAVE_VSNPRINTF)
-CHECK_FUNCTION_EXISTS (vprintf HAVE_VPRINTF)
-CHECK_FUNCTION_EXISTS (valloc HAVE_VALLOC)
-CHECK_FUNCTION_EXISTS (memalign HAVE_MEMALIGN)
-CHECK_FUNCTION_EXISTS (chown HAVE_CHOWN)
-CHECK_FUNCTION_EXISTS (nl_langinfo HAVE_NL_LANGINFO)
-CHECK_FUNCTION_EXISTS (snprintf HAVE_DECL_SNPRINTF)
-CHECK_FUNCTION_EXISTS (vsnprintf HAVE_DECL_VSNPRINTF)
-CHECK_FUNCTION_EXISTS (unsetenv HAVE_UNSETENV)
-
+check_function_exists ( aio_read HAVE_AIO_READ )
+check_function_exists ( alarm HAVE_ALARM )
+set ( HAVE_ALLOCA 1 )
+check_function_exists ( backtrace HAVE_BACKTRACE )
+check_function_exists ( backtrace_symbols HAVE_BACKTRACE_SYMBOLS )
+check_function_exists ( backtrace_symbols_fd HAVE_BACKTRACE_SYMBOLS_FD )
+check_function_exists ( printstack HAVE_PRINTSTACK )
+check_function_exists ( bfill HAVE_BFILL )
+check_function_exists ( bmove HAVE_BMOVE )
+check_function_exists ( bsearch HAVE_BSEARCH )
+check_function_exists ( index HAVE_INDEX )
+check_function_exists ( bzero HAVE_BZERO )
+check_function_exists ( clock_gettime HAVE_CLOCK_GETTIME )
+check_function_exists ( cuserid HAVE_CUSERID )
+check_function_exists ( directio HAVE_DIRECTIO )
+check_function_exists ( _doprnt HAVE_DOPRNT )
+check_function_exists ( flockfile HAVE_FLOCKFILE )
+check_function_exists ( ftruncate HAVE_FTRUNCATE )
+check_function_exists ( getline HAVE_GETLINE )
+check_function_exists ( compress HAVE_COMPRESS )
+check_function_exists ( crypt HAVE_CRYPT )
+check_function_exists ( dlerror HAVE_DLERROR )
+check_function_exists ( dlopen HAVE_DLOPEN )
+check_function_exists ( fchmod HAVE_FCHMOD )
+check_function_exists ( fcntl HAVE_FCNTL )
+check_function_exists ( fconvert HAVE_FCONVERT )
+check_function_exists ( fdatasync HAVE_FDATASYNC )
+check_symbol_exists ( fdatasync "unistd.h" HAVE_DECL_FDATASYNC )
+check_function_exists ( fesetround HAVE_FESETROUND )
+check_function_exists ( fpsetmask HAVE_FPSETMASK )
+check_function_exists ( fseeko HAVE_FSEEKO )
+check_function_exists ( fsync HAVE_FSYNC )
+check_function_exists ( getcwd HAVE_GETCWD )
+check_function_exists ( gethostbyaddr_r HAVE_GETHOSTBYADDR_R )
+check_function_exists ( gethostbyname_r HAVE_GETHOSTBYNAME_R )
+check_function_exists ( gethrtime HAVE_GETHRTIME )
+check_function_exists ( getnameinfo HAVE_GETNAMEINFO )
+check_function_exists ( getpass HAVE_GETPASS )
+check_function_exists ( getpassphrase HAVE_GETPASSPHRASE )
+check_function_exists ( getpwnam HAVE_GETPWNAM )
+check_function_exists ( getpwuid HAVE_GETPWUID )
+check_function_exists ( getrlimit HAVE_GETRLIMIT )
+check_function_exists ( getrusage HAVE_GETRUSAGE )
+check_function_exists ( getwd HAVE_GETWD )
+check_function_exists ( gmtime_r HAVE_GMTIME_R )
+check_function_exists ( initgroups HAVE_INITGROUPS )
+check_function_exists ( issetugid HAVE_ISSETUGID )
+check_function_exists ( ldiv HAVE_LDIV )
+check_function_exists ( localtime_r HAVE_LOCALTIME_R )
+check_function_exists ( longjmp HAVE_LONGJMP )
+check_function_exists ( lstat HAVE_LSTAT )
+check_function_exists ( madvise HAVE_MADVISE )
+check_function_exists ( mallinfo HAVE_MALLINFO )
+check_function_exists ( memcpy HAVE_MEMCPY )
+check_function_exists ( memmove HAVE_MEMMOVE )
+check_function_exists ( mkstemp HAVE_MKSTEMP )
+check_function_exists ( mlock HAVE_MLOCK )
+check_function_exists ( mlockall HAVE_MLOCKALL )
+check_function_exists ( mmap HAVE_MMAP )
+check_function_exists ( mmap64 HAVE_MMAP64 )
+check_function_exists ( perror HAVE_PERROR )
+check_function_exists ( poll HAVE_POLL )
+check_function_exists ( port_create HAVE_PORT_CREATE )
+check_function_exists ( posix_fallocate HAVE_POSIX_FALLOCATE )
+check_function_exists ( pread HAVE_PREAD )
+check_function_exists ( pthread_attr_create HAVE_PTHREAD_ATTR_CREATE )
+check_function_exists ( pthread_attr_getstacksize HAVE_PTHREAD_ATTR_GETSTACKSIZE )
+check_function_exists ( pthread_attr_setscope HAVE_PTHREAD_ATTR_SETSCOPE )
+check_function_exists ( pthread_attr_setstacksize HAVE_PTHREAD_ATTR_SETSTACKSIZE )
+check_function_exists ( pthread_condattr_create HAVE_PTHREAD_CONDATTR_CREATE )
+check_function_exists ( pthread_condattr_setclock HAVE_PTHREAD_CONDATTR_SETCLOCK )
+check_function_exists ( pthread_init HAVE_PTHREAD_INIT )
+check_function_exists ( pthread_key_delete HAVE_PTHREAD_KEY_DELETE )
+check_function_exists ( pthread_rwlock_rdlock HAVE_PTHREAD_RWLOCK_RDLOCK )
+check_function_exists ( pthread_sigmask HAVE_PTHREAD_SIGMASK )
+check_function_exists ( pthread_threadmask HAVE_PTHREAD_THREADMASK )
+check_function_exists ( pthread_yield_np HAVE_PTHREAD_YIELD_NP )
+check_function_exists ( putenv HAVE_PUTENV )
+check_function_exists ( readdir_r HAVE_READDIR_R )
+check_function_exists ( readlink HAVE_READLINK )
+check_function_exists ( re_comp HAVE_RE_COMP )
+check_function_exists ( regcomp HAVE_REGCOMP )
+check_function_exists ( realpath HAVE_REALPATH )
+check_function_exists ( rename HAVE_RENAME )
+check_function_exists ( rwlock_init HAVE_RWLOCK_INIT )
+check_function_exists ( sched_yield HAVE_SCHED_YIELD )
+check_function_exists ( setenv HAVE_SETENV )
+check_function_exists ( setlocale HAVE_SETLOCALE )
+check_function_exists ( setfd HAVE_SETFD )
+check_function_exists ( sigaction HAVE_SIGACTION )
+check_function_exists ( sigthreadmask HAVE_SIGTHREADMASK )
+check_function_exists ( sigwait HAVE_SIGWAIT )
+check_function_exists ( sigaddset HAVE_SIGADDSET )
+check_function_exists ( sigemptyset HAVE_SIGEMPTYSET )
+check_function_exists ( sighold HAVE_SIGHOLD )
+check_function_exists ( sigset HAVE_SIGSET )
+check_function_exists ( sleep HAVE_SLEEP )
+check_function_exists ( snprintf HAVE_SNPRINTF )
+check_function_exists ( stpcpy HAVE_STPCPY )
+check_function_exists ( strcoll HAVE_STRCOLL )
+check_function_exists ( strerror HAVE_STRERROR )
+check_function_exists ( strlcpy HAVE_STRLCPY )
+check_function_exists ( strnlen HAVE_STRNLEN )
+check_function_exists ( strlcat HAVE_STRLCAT )
+check_function_exists ( strsignal HAVE_STRSIGNAL )
+check_function_exists ( fgetln HAVE_FGETLN )
+check_function_exists ( strpbrk HAVE_STRPBRK )
+check_function_exists ( strsep HAVE_STRSEP )
+check_function_exists ( strstr HAVE_STRSTR )
+check_function_exists ( strtok_r HAVE_STRTOK_R )
+check_function_exists ( strtol HAVE_STRTOL )
+check_function_exists ( strtoll HAVE_STRTOLL )
+check_function_exists ( strtoul HAVE_STRTOUL )
+check_function_exists ( strtoull HAVE_STRTOULL )
+check_function_exists ( strcasecmp HAVE_STRCASECMP )
+check_function_exists ( strncasecmp HAVE_STRNCASECMP )
+check_function_exists ( strdup HAVE_STRDUP )
+check_function_exists ( shmat HAVE_SHMAT )
+check_function_exists ( shmctl HAVE_SHMCTL )
+check_function_exists ( shmdt HAVE_SHMDT )
+check_function_exists ( shmget HAVE_SHMGET )
+check_function_exists ( tell HAVE_TELL )
+check_function_exists ( tempnam HAVE_TEMPNAM )
+check_function_exists ( thr_setconcurrency HAVE_THR_SETCONCURRENCY )
+check_function_exists ( thr_yield HAVE_THR_YIELD )
+check_function_exists ( vasprintf HAVE_VASPRINTF )
+check_function_exists ( vsnprintf HAVE_VSNPRINTF )
+check_function_exists ( vprintf HAVE_VPRINTF )
+check_function_exists ( valloc HAVE_VALLOC )
+check_function_exists ( memalign HAVE_MEMALIGN )
+check_function_exists ( chown HAVE_CHOWN )
+check_function_exists ( nl_langinfo HAVE_NL_LANGINFO )
+check_function_exists ( snprintf HAVE_DECL_SNPRINTF )
+check_function_exists ( vsnprintf HAVE_DECL_VSNPRINTF )
+check_function_exists ( unsetenv HAVE_UNSETENV )
 
 #--------------------------------------------------------------------
 # Support for WL#2373 (Use cycle counter for timing)
 #--------------------------------------------------------------------
 
-CHECK_INCLUDE_FILES(time.h HAVE_TIME_H)
-CHECK_INCLUDE_FILES(sys/time.h HAVE_SYS_TIME_H)
-CHECK_INCLUDE_FILES(sys/times.h HAVE_SYS_TIMES_H)
-CHECK_INCLUDE_FILES(asm/msr.h HAVE_ASM_MSR_H)
+check_include_files ( time.h HAVE_TIME_H )
+check_include_files ( sys/time.h HAVE_SYS_TIME_H )
+check_include_files ( sys/times.h HAVE_SYS_TIMES_H )
+check_include_files ( asm/msr.h HAVE_ASM_MSR_H )
 #msr.h has rdtscll()
 
-CHECK_INCLUDE_FILES(ia64intrin.h HAVE_IA64INTRIN_H)
+check_include_files ( ia64intrin.h HAVE_IA64INTRIN_H )
 
-CHECK_FUNCTION_EXISTS(times HAVE_TIMES)
-CHECK_FUNCTION_EXISTS(gettimeofday HAVE_GETTIMEOFDAY)
-CHECK_FUNCTION_EXISTS(read_real_time HAVE_READ_REAL_TIME)
+check_function_exists ( times HAVE_TIMES )
+check_function_exists ( gettimeofday HAVE_GETTIMEOFDAY )
+check_function_exists ( read_real_time HAVE_READ_REAL_TIME )
 # This should work on AIX.
 
-CHECK_FUNCTION_EXISTS(ftime HAVE_FTIME)
+check_function_exists ( ftime HAVE_FTIME )
 # This is still a normal call for milliseconds.
 
-CHECK_FUNCTION_EXISTS(time HAVE_TIME)
+check_function_exists ( time HAVE_TIME )
 # We can use time() on Macintosh if there is no ftime().
 
-CHECK_FUNCTION_EXISTS(rdtscll HAVE_RDTSCLL)
+check_function_exists ( rdtscll HAVE_RDTSCLL )
 # I doubt that we'll ever reach the check for this.
-
 
 #
 # Tests for symbols
 #
 
-CHECK_SYMBOL_EXISTS(sys_errlist "stdio.h" HAVE_SYS_ERRLIST)
-CHECK_SYMBOL_EXISTS(madvise "sys/mman.h" HAVE_DECL_MADVISE)
-CHECK_SYMBOL_EXISTS(tzname "time.h" HAVE_TZNAME)
-CHECK_SYMBOL_EXISTS(lrand48 "stdlib.h" HAVE_LRAND48)
-CHECK_SYMBOL_EXISTS(getpagesize "unistd.h" HAVE_GETPAGESIZE)
-CHECK_SYMBOL_EXISTS(TIOCGWINSZ "sys/ioctl.h" GWINSZ_IN_SYS_IOCTL)
-CHECK_SYMBOL_EXISTS(FIONREAD "sys/ioctl.h" FIONREAD_IN_SYS_IOCTL)
-CHECK_SYMBOL_EXISTS(TIOCSTAT "sys/ioctl.h" TIOCSTAT_IN_SYS_IOCTL)
-CHECK_SYMBOL_EXISTS(gettimeofday "sys/time.h" HAVE_GETTIMEOFDAY)
+check_symbol_exists ( sys_errlist "stdio.h" HAVE_SYS_ERRLIST )
+check_symbol_exists ( madvise "sys/mman.h" HAVE_DECL_MADVISE )
+check_symbol_exists ( tzname "time.h" HAVE_TZNAME )
+check_symbol_exists ( lrand48 "stdlib.h" HAVE_LRAND48 )
+check_symbol_exists ( getpagesize "unistd.h" HAVE_GETPAGESIZE )
+check_symbol_exists ( TIOCGWINSZ "sys/ioctl.h" GWINSZ_IN_SYS_IOCTL )
+check_symbol_exists ( FIONREAD "sys/ioctl.h" FIONREAD_IN_SYS_IOCTL )
+check_symbol_exists ( TIOCSTAT "sys/ioctl.h" TIOCSTAT_IN_SYS_IOCTL )
+check_symbol_exists ( gettimeofday "sys/time.h" HAVE_GETTIMEOFDAY )
 
-CHECK_SYMBOL_EXISTS(finite  "math.h" HAVE_FINITE_IN_MATH_H)
-IF(HAVE_FINITE_IN_MATH_H)
-  SET(HAVE_FINITE TRUE CACHE INTERNAL "")
-ELSE()
-  CHECK_SYMBOL_EXISTS(finite  "ieeefp.h" HAVE_FINITE)
-ENDIF()
-CHECK_SYMBOL_EXISTS(log2  math.h HAVE_LOG2)
-CHECK_SYMBOL_EXISTS(isnan math.h HAVE_ISNAN)
-CHECK_SYMBOL_EXISTS(rint  math.h HAVE_RINT)
+check_symbol_exists ( finite "math.h" HAVE_FINITE_IN_MATH_H )
+if ( HAVE_FINITE_IN_MATH_H )
+  set ( HAVE_FINITE TRUE CACHE INTERNAL "" )
+else ( )
+  check_symbol_exists ( finite "ieeefp.h" HAVE_FINITE )
+endif ( )
+check_symbol_exists ( log2 math.h HAVE_LOG2 )
+check_symbol_exists ( isnan math.h HAVE_ISNAN )
+check_symbol_exists ( rint math.h HAVE_RINT )
 
 # isinf() prototype not found on Solaris
-CHECK_CXX_SOURCE_COMPILES(
-"#include  &lt;math.h&gt;
-int main() { 
-  isinf(0.0); 
-  return 0;
-}" HAVE_ISINF)
-
-
+check_cxx_source_compiles ( "#include &lt;math.h&gt; int main() { isinf(0.0); return 0; }" 
+  HAVE_ISINF )
 
 #
 # Test for endianess
 #
-INCLUDE(TestBigEndian)
-IF(APPLE)
+include ( TestBigEndian )
+if ( APPLE )
   # Cannot run endian test on universal PPC/Intel binaries 
   # would return inconsistent result.
   # config.h.cmake includes a special #ifdef for Darwin
-ELSE()
-  TEST_BIG_ENDIAN(WORDS_BIGENDIAN)
-ENDIF()
+else ( )
+  test_big_endian ( WORDS_BIGENDIAN )
+endif ( )
 
 #
 # Tests for type sizes (and presence)
 #
-INCLUDE (CheckTypeSize)
-set(CMAKE_REQUIRED_DEFINITIONS ${CMAKE_REQUIRED_DEFINITIONS}
-        -D_LARGEFILE_SOURCE -D_LARGE_FILES -D_FILE_OFFSET_BITS=64
-        -D__STDC_LIMIT_MACROS -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS)
-SET(CMAKE_EXTRA_INCLUDE_FILES signal.h)
-MY_CHECK_TYPE_SIZE(sigset_t SIGSET_T)
-IF(NOT SIZEOF_SIGSET_T)
- SET(sigset_t int)
-ENDIF()
-MY_CHECK_TYPE_SIZE(mode_t MODE_T)
-IF(NOT SIZEOF_MODE_T)
- SET(mode_t int)
-ENDIF()
+include ( CheckTypeSize )
+set ( CMAKE_REQUIRED_DEFINITIONS ${CMAKE_REQUIRED_DEFINITIONS} -D_LARGEFILE_SOURCE 
+  -D_LARGE_FILES -D_FILE_OFFSET_BITS=64 -D__STDC_LIMIT_MACROS -D__STDC_CONSTANT_MACROS 
+  -D__STDC_FORMAT_MACROS )
+set ( CMAKE_EXTRA_INCLUDE_FILES signal.h )
+my_check_type_size ( sigset_t SIGSET_T )
+if ( NOT SIZEOF_SIGSET_T )
+  set ( sigset_t int )
+endif ( )
+my_check_type_size ( mode_t MODE_T )
+if ( NOT SIZEOF_MODE_T )
+  set ( mode_t int )
+endif ( )
 
+if ( HAVE_STDINT_H )
+  set ( CMAKE_EXTRA_INCLUDE_FILES stdint.h )
+endif ( HAVE_STDINT_H )
 
-IF(HAVE_STDINT_H)
-  SET(CMAKE_EXTRA_INCLUDE_FILES stdint.h)
-ENDIF(HAVE_STDINT_H)
+set ( HAVE_VOIDP 1 )
+set ( HAVE_CHARP 1 )
+set ( HAVE_LONG 1 )
+set ( HAVE_SIZE_T 1 )
 
-SET(HAVE_VOIDP 1)
-SET(HAVE_CHARP 1)
-SET(HAVE_LONG 1)
-SET(HAVE_SIZE_T 1)
+if ( NOT APPLE )
+  my_check_type_size ( "void *" VOIDP )
+  my_check_type_size ( "char *" CHARP )
+  my_check_type_size ( long LONG )
+  my_check_type_size ( size_t SIZE_T )
+endif ( )
 
-IF(NOT APPLE)
-MY_CHECK_TYPE_SIZE("void *" VOIDP)
-MY_CHECK_TYPE_SIZE("char *" CHARP)
-MY_CHECK_TYPE_SIZE(long LONG)
-MY_CHECK_TYPE_SIZE(size_t SIZE_T)
-ENDIF()
+my_check_type_size ( char CHAR )
+my_check_type_size ( short SHORT )
+my_check_type_size ( int INT )
+my_check_type_size ( "long long" LONG_LONG )
+set ( CMAKE_EXTRA_INCLUDE_FILES stdio.h sys/types.h )
+my_check_type_size ( off_t OFF_T )
+my_check_type_size ( uchar UCHAR )
+my_check_type_size ( uint UINT )
+my_check_type_size ( ulong ULONG )
+my_check_type_size ( int8 INT8 )
+my_check_type_size ( uint8 UINT8 )
+my_check_type_size ( int16 INT16 )
+my_check_type_size ( uint16 UINT16 )
+my_check_type_size ( int32 INT32 )
+my_check_type_size ( uint32 UINT32 )
+my_check_type_size ( u_int32_t U_INT32_T )
+my_check_type_size ( int64 INT64 )
+my_check_type_size ( uint64 UINT64 )
+my_check_type_size ( "long int" LONG_INT_64 )
+my_check_type_size ( "long long int" LONG_LONG_INT_64 )
+set ( CMAKE_EXTRA_INCLUDE_FILES sys/types.h )
+my_check_type_size ( bool BOOL )
+set ( CMAKE_EXTRA_INCLUDE_FILES )
 
-MY_CHECK_TYPE_SIZE(char CHAR)
-MY_CHECK_TYPE_SIZE(short SHORT)
-MY_CHECK_TYPE_SIZE(int INT)
-MY_CHECK_TYPE_SIZE("long long" LONG_LONG)
-SET(CMAKE_EXTRA_INCLUDE_FILES stdio.h sys/types.h)
-MY_CHECK_TYPE_SIZE(off_t OFF_T)
-MY_CHECK_TYPE_SIZE(uchar UCHAR)
-MY_CHECK_TYPE_SIZE(uint UINT)
-MY_CHECK_TYPE_SIZE(ulong ULONG)
-MY_CHECK_TYPE_SIZE(int8 INT8)
-MY_CHECK_TYPE_SIZE(uint8 UINT8)
-MY_CHECK_TYPE_SIZE(int16 INT16)
-MY_CHECK_TYPE_SIZE(uint16 UINT16)
-MY_CHECK_TYPE_SIZE(int32 INT32)
-MY_CHECK_TYPE_SIZE(uint32 UINT32)
-MY_CHECK_TYPE_SIZE(u_int32_t U_INT32_T)
-MY_CHECK_TYPE_SIZE(int64 INT64)
-MY_CHECK_TYPE_SIZE(uint64 UINT64)
-MY_CHECK_TYPE_SIZE("long int" LONG_INT_64)
-MY_CHECK_TYPE_SIZE("long long int" LONG_LONG_INT_64)
-SET (CMAKE_EXTRA_INCLUDE_FILES sys/types.h)
-MY_CHECK_TYPE_SIZE(bool  BOOL)
-SET(CMAKE_EXTRA_INCLUDE_FILES)
+if ( HAVE_SYS_SOCKET_H )
+  set ( CMAKE_EXTRA_INCLUDE_FILES sys/socket.h )
+endif ( HAVE_SYS_SOCKET_H )
+my_check_type_size ( socklen_t SOCKLEN_T )
+set ( CMAKE_EXTRA_INCLUDE_FILES )
 
-IF(HAVE_SYS_SOCKET_H)
-  SET(CMAKE_EXTRA_INCLUDE_FILES sys/socket.h)
-ENDIF(HAVE_SYS_SOCKET_H)
-MY_CHECK_TYPE_SIZE(socklen_t SOCKLEN_T)
-SET(CMAKE_EXTRA_INCLUDE_FILES)
-
-IF(HAVE_IEEEFP_H)
-  SET(CMAKE_EXTRA_INCLUDE_FILES ieeefp.h)
-  MY_CHECK_TYPE_SIZE(fp_except FP_EXCEPT)
-ENDIF()
-
+if ( HAVE_IEEEFP_H )
+  set ( CMAKE_EXTRA_INCLUDE_FILES ieeefp.h )
+  my_check_type_size ( fp_except FP_EXCEPT )
+endif ( )
 
 #
 # Code tests
 #
 
-CHECK_C_SOURCE_COMPILES("
-#ifdef _WIN32
-#include &lt;winsock2.h&gt;
-#include &lt;ws2tcpip.h&gt;
-#else
-#include &lt;sys/types.h&gt;
-#include &lt;sys/socket.h&gt;
-#include &lt;netdb.h&gt;
-#endif
-int main()
-{
-  getaddrinfo( 0, 0, 0, 0);
-  return 0;
-}"
-HAVE_GETADDRINFO)
+check_c_source_compiles ( " #ifdef _WIN32 #include &lt;winsock2.h&gt; #include &lt;ws2tcpip.h&gt; #else #include &lt;sys/types.h&gt; #include &lt;sys/socket.h&gt; #include &lt;netdb.h&gt; #endif int main() { getaddrinfo( 0, 0, 0, 0); return 0; }" 
+  HAVE_GETADDRINFO )
 
-CHECK_C_SOURCE_COMPILES("
-#ifdef _WIN32
-#include &lt;winsock2.h&gt;
-#include &lt;ws2tcpip.h&gt;
-#else
-#include &lt;sys/types.h&gt;
-#include &lt;sys/socket.h&gt;
-#include &lt;netdb.h&gt;
-#endif
-int main()
-{
-  select(0,0,0,0,0);
-  return 0;
-}"
-HAVE_SELECT)
+check_c_source_compiles ( " #ifdef _WIN32 #include &lt;winsock2.h&gt; #include &lt;ws2tcpip.h&gt; #else #include &lt;sys/types.h&gt; #include &lt;sys/socket.h&gt; #include &lt;netdb.h&gt; #endif int main() { select(0,0,0,0,0); return 0; }" 
+  HAVE_SELECT )
 
 #
 # Check if timespec has ts_sec and ts_nsec fields
 #
 
-CHECK_C_SOURCE_COMPILES("
-#include &lt;pthread.h&gt;
-
-int main(int ac, char **av)
-{
-  struct timespec abstime;
-  abstime.ts_sec = time(NULL)+1;
-  abstime.ts_nsec = 0;
-}
-" HAVE_TIMESPEC_TS_SEC)
-
+check_c_source_compiles ( " #include &lt;pthread.h&gt; int main(int ac, char **av) { struct timespec abstime; abstime.ts_sec = time(NULL)+1; abstime.ts_nsec = 0; } " 
+  HAVE_TIMESPEC_TS_SEC )
 
 #
 # Check return type of qsort()
 #
-CHECK_C_SOURCE_COMPILES("
-#include &lt;stdlib.h&gt;
-#ifdef __cplusplus
-extern \"C\"
-#endif
-void qsort(void *base, size_t nel, size_t width,
-  int (*compar) (const void *, const void *));
-int main(int ac, char **av) {}
-" QSORT_TYPE_IS_VOID)
-IF(QSORT_TYPE_IS_VOID)
-  SET(RETQSORTTYPE "void")
-ELSE(QSORT_TYPE_IS_VOID)
-  SET(RETQSORTTYPE "int")
-ENDIF(QSORT_TYPE_IS_VOID)
+check_c_source_compiles ( " #include &lt;stdlib.h&gt; #ifdef __cplusplus extern \"C\" #endif void qsort(void *base, size_t nel, size_t width, int (*compar) (const void *, const void *)); int main(int ac, char **av) {} " 
+  QSORT_TYPE_IS_VOID )
+if ( QSORT_TYPE_IS_VOID )
+  set ( RETQSORTTYPE "void" )
+else ( QSORT_TYPE_IS_VOID )
+  set ( RETQSORTTYPE "int" )
+endif ( QSORT_TYPE_IS_VOID )
 
-IF(WIN32)
-SET(SOCKET_SIZE_TYPE int)
-ELSE()
-CHECK_CXX_SOURCE_COMPILES("
-#include &lt;sys/socket.h&gt;
-int main(int argc, char **argv)
-{
-  getsockname(0,0,(socklen_t *) 0);
-  return 0; 
-}"
-HAVE_SOCKET_SIZE_T_AS_socklen_t)
+if ( WIN32 )
+  set ( SOCKET_SIZE_TYPE int )
+else ( )
+  check_cxx_source_compiles ( " #include &lt;sys/socket.h&gt; int main(int argc, char **argv) { getsockname(0,0,(socklen_t *) 0); return 0; }" 
+    HAVE_SOCKET_SIZE_T_AS_socklen_t )
 
-IF(HAVE_SOCKET_SIZE_T_AS_socklen_t)
-  SET(SOCKET_SIZE_TYPE socklen_t)
-ELSE()
-  CHECK_CXX_SOURCE_COMPILES("
-  #include &lt;sys/socket.h&gt;
-  int main(int argc, char **argv)
-  {
-    getsockname(0,0,(int *) 0);
-    return 0; 
-  }"
-  HAVE_SOCKET_SIZE_T_AS_int)
-  IF(HAVE_SOCKET_SIZE_T_AS_int)
-    SET(SOCKET_SIZE_TYPE int)
-  ELSE()
-    CHECK_CXX_SOURCE_COMPILES("
-    #include &lt;sys/socket.h&gt;
-    int main(int argc, char **argv)
-    {
-      getsockname(0,0,(size_t *) 0);
-      return 0; 
-    }"
-    HAVE_SOCKET_SIZE_T_AS_size_t)
-    IF(HAVE_SOCKET_SIZE_T_AS_size_t)
-      SET(SOCKET_SIZE_TYPE size_t)
-    ELSE()
-      SET(SOCKET_SIZE_TYPE int)
-    ENDIF()
-  ENDIF()
-ENDIF()
-ENDIF()
+  if ( HAVE_SOCKET_SIZE_T_AS_socklen_t )
+    set ( SOCKET_SIZE_TYPE socklen_t )
+  else ( )
+    check_cxx_source_compiles ( " #include &lt;sys/socket.h&gt; int main(int argc, char **argv) { getsockname(0,0,(int *) 0); return 0; }" 
+      HAVE_SOCKET_SIZE_T_AS_int )
+    if ( HAVE_SOCKET_SIZE_T_AS_int )
+      set ( SOCKET_SIZE_TYPE int )
+    else ( )
+      check_cxx_source_compiles ( " #include &lt;sys/socket.h&gt; int main(int argc, char **argv) { getsockname(0,0,(size_t *) 0); return 0; }" 
+        HAVE_SOCKET_SIZE_T_AS_size_t )
+      if ( HAVE_SOCKET_SIZE_T_AS_size_t )
+        set ( SOCKET_SIZE_TYPE size_t )
+      else ( )
+        set ( SOCKET_SIZE_TYPE int )
+      endif ( )
+    endif ( )
+  endif ( )
+endif ( )
 
-CHECK_CXX_SOURCE_COMPILES("
-#include &lt;pthread.h&gt;
-int main()
-{
-  pthread_yield();
-  return 0;
-}
-" HAVE_PTHREAD_YIELD_ZERO_ARG)
+check_cxx_source_compiles ( " #include &lt;pthread.h&gt; int main() { pthread_yield(); return 0; } " 
+  HAVE_PTHREAD_YIELD_ZERO_ARG )
 
-IF(NOT STACK_DIRECTION)
-  IF(CMAKE_CROSSCOMPILING)
-   MESSAGE(FATAL_ERROR 
-   "STACK_DIRECTION is not defined.  Please specify -DSTACK_DIRECTION=1 "
-   "or -DSTACK_DIRECTION=-1 when calling cmake.")
-  ELSE()
-    TRY_RUN(STACKDIR_RUN_RESULT STACKDIR_COMPILE_RESULT    
-     ${CMAKE_BINARY_DIR} 
-     ${CMAKE_SOURCE_DIR}/cmake/stack_direction.c
-     )
-     # Test program returns 0 (down) or 1 (up).
-     # Convert to -1 or 1
-     IF(STACKDIR_RUN_RESULT EQUAL 0)
-       SET(STACK_DIRECTION -1 CACHE INTERNAL "Stack grows direction")
-     ELSE()
-       SET(STACK_DIRECTION 1 CACHE INTERNAL "Stack grows direction")
-     ENDIF()
-     MESSAGE(STATUS "Checking stack direction : ${STACK_DIRECTION}")
-   ENDIF()
-ENDIF()
+if ( NOT STACK_DIRECTION )
+  if ( CMAKE_CROSSCOMPILING )
+    message ( FATAL_ERROR "STACK_DIRECTION is not defined. Please specify -DSTACK_DIRECTION=1 " 
+      "or -DSTACK_DIRECTION=-1 when calling cmake." )
+  else ( )
+    try_run ( STACKDIR_RUN_RESULT STACKDIR_COMPILE_RESULT ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR}/cmake/stack_direction.c )
+    # Test program returns 0 (down) or 1 (up).
+    # Convert to -1 or 1
+    if ( STACKDIR_RUN_RESULT EQUAL 0 )
+      set ( STACK_DIRECTION -1 CACHE INTERNAL "Stack grows direction" )
+    else ( )
+      set ( STACK_DIRECTION 1 CACHE INTERNAL "Stack grows direction" )
+    endif ( )
+    message ( STATUS "Checking stack direction : ${STACK_DIRECTION}" )
+  endif ( )
+endif ( )
 
 #
 # Check return type of signal handlers
 #
-CHECK_C_SOURCE_COMPILES("
-#include &lt;signal.h&gt;
-#ifdef signal
-# undef signal
-#endif
-#ifdef __cplusplus
-extern \"C\" void (*signal (int, void (*)(int)))(int);
-#else
-void (*signal ()) ();
-#endif
-int main(int ac, char **av) {}
-" SIGNAL_RETURN_TYPE_IS_VOID)
-IF(SIGNAL_RETURN_TYPE_IS_VOID)
-  SET(RETSIGTYPE void)
-  SET(VOID_SIGHANDLER 1)
-ELSE(SIGNAL_RETURN_TYPE_IS_VOID)
-  SET(RETSIGTYPE int)
-ENDIF(SIGNAL_RETURN_TYPE_IS_VOID)
+check_c_source_compiles ( " #include &lt;signal.h&gt; #ifdef signal # undef signal #endif #ifdef __cplusplus extern \"C\" void (*signal (int, void (*)(int)))(int); #else void (*signal ()) (); #endif int main(int ac, char **av) {} " 
+  SIGNAL_RETURN_TYPE_IS_VOID )
+if ( SIGNAL_RETURN_TYPE_IS_VOID )
+  set ( RETSIGTYPE void )
+  set ( VOID_SIGHANDLER 1 )
+else ( SIGNAL_RETURN_TYPE_IS_VOID )
+  set ( RETSIGTYPE int )
+endif ( SIGNAL_RETURN_TYPE_IS_VOID )
 
-
-CHECK_INCLUDE_FILES("time.h;sys/time.h" TIME_WITH_SYS_TIME)
-CHECK_SYMBOL_EXISTS(O_NONBLOCK "unistd.h;fcntl.h" HAVE_FCNTL_NONBLOCK)
-IF(NOT HAVE_FCNTL_NONBLOCK)
- SET(NO_FCNTL_NONBLOCK 1)
-ENDIF()
+check_include_files ( "time.h;sys/time.h" TIME_WITH_SYS_TIME )
+check_symbol_exists ( O_NONBLOCK "unistd.h;fcntl.h" HAVE_FCNTL_NONBLOCK )
+if ( NOT HAVE_FCNTL_NONBLOCK )
+  set ( NO_FCNTL_NONBLOCK 1 )
+endif ( )
 
 #
 # Test for how the C compiler does inline, if at all
 #
-CHECK_C_SOURCE_COMPILES("
-static inline int foo(){return 0;}
-int main(int argc, char *argv[]){return 0;}"
-                            C_HAS_inline)
-IF(NOT C_HAS_inline)
-  CHECK_C_SOURCE_COMPILES("
-  static __inline int foo(){return 0;}
-  int main(int argc, char *argv[]){return 0;}"
-                            C_HAS___inline)
-  SET(C_INLINE __inline)
-ENDIF()
+check_c_source_compiles ( " static inline int foo(){return 0;} int main(int argc, char *argv[]){return 0;}" 
+  C_HAS_inline )
+if ( NOT C_HAS_inline )
+  check_c_source_compiles ( " static __inline int foo(){return 0;} int main(int argc, char *argv[]){return 0;}" 
+    C_HAS___inline )
+  set ( C_INLINE __inline )
+endif ( )
 
-IF(NOT CMAKE_CROSSCOMPILING AND NOT MSVC)
-  STRING(TOLOWER ${CMAKE_SYSTEM_PROCESSOR}  processor)
-  IF(processor MATCHES "86" OR processor MATCHES "amd64" OR processor MATCHES "x64")
-  #Check for x86 PAUSE instruction
-  # We have to actually try running the test program, because of a bug
-  # in Solaris on x86_64, where it wrongly reports that PAUSE is not
-  # supported when trying to run an application.  See
-  # http://bugs.opensolaris.org/bugdatabase/printableBug.do?bug_id=6478684
-  CHECK_C_SOURCE_RUNS("
-  int main()
-  { 
-    __asm__ __volatile__ (\"pause\"); 
-    return 0;
-  }"  HAVE_PAUSE_INSTRUCTION)
-  ENDIF()
-  IF (NOT HAVE_PAUSE_INSTRUCTION)
-    CHECK_C_SOURCE_COMPILES("
-    int main()
-    {
-     __asm__ __volatile__ (\"rep; nop\");
-     return 0;
-    }
-   " HAVE_FAKE_PAUSE_INSTRUCTION)
-  ENDIF()
-ENDIF()
-  
-CHECK_SYMBOL_EXISTS(tcgetattr "termios.h" HAVE_TCGETATTR 1)
+if ( NOT CMAKE_CROSSCOMPILING AND NOT MSVC )
+  string ( TOLOWER ${CMAKE_SYSTEM_PROCESSOR} processor )
+  if ( processor MATCHES "86" OR processor MATCHES "amd64" OR processor MATCHES "x64" )
+    #Check for x86 PAUSE instruction
+    # We have to actually try running the test program, because of a bug
+    # in Solaris on x86_64, where it wrongly reports that PAUSE is not
+    # supported when trying to run an application.  See
+    # http://bugs.opensolaris.org/bugdatabase/printableBug.do?bug_id=6478684
+    check_c_source_runs ( " int main() { __asm__ __volatile__ (\"pause\"); return 0; }" 
+      HAVE_PAUSE_INSTRUCTION )
+  endif ( )
+  if ( NOT HAVE_PAUSE_INSTRUCTION )
+    check_c_source_compiles ( " int main() { __asm__ __volatile__ (\"rep; nop\"); return 0; } " 
+      HAVE_FAKE_PAUSE_INSTRUCTION )
+  endif ( )
+endif ( )
+check_symbol_exists ( tcgetattr "termios.h" HAVE_TCGETATTR 1 )
 
 #
 # Check type of signal routines (posix, 4.2bsd, 4.1bsd or v7)
 #
-CHECK_C_SOURCE_COMPILES("
-  #include &lt;signal.h&gt;
-  int main(int ac, char **av)
-  {
-    sigset_t ss;
-    struct sigaction sa;
-    sigemptyset(&amp;ss); sigsuspend(&amp;ss);
-    sigaction(SIGINT, &amp;sa, (struct sigaction *) 0);
-    sigprocmask(SIG_BLOCK, &amp;ss, (sigset_t *) 0);
-  }"
-  HAVE_POSIX_SIGNALS)
+check_c_source_compiles ( " #include &lt;signal.h&gt; int main(int ac, char **av) { sigset_t ss; struct sigaction sa; sigemptyset(&amp;ss); sigsuspend(&amp;ss); sigaction(SIGINT, &amp;sa, (struct sigaction *) 0); sigprocmask(SIG_BLOCK, &amp;ss, (sigset_t *) 0); }" 
+  HAVE_POSIX_SIGNALS )
 
-IF(NOT HAVE_POSIX_SIGNALS)
- CHECK_C_SOURCE_COMPILES("
-  #include &lt;signal.h&gt;
-  int main(int ac, char **av)
-  {
-    int mask = sigmask(SIGINT);
-    sigsetmask(mask); sigblock(mask); sigpause(mask);
-  }"
-  HAVE_BSD_SIGNALS)
-  IF (NOT HAVE_BSD_SIGNALS)
-    CHECK_C_SOURCE_COMPILES("
-    #include &lt;signal.h&gt;
-    void foo() { }
-    int main(int ac, char **av)
-    {
-      int mask = sigmask(SIGINT);
-      sigset(SIGINT, foo); sigrelse(SIGINT);
-      sighold(SIGINT); sigpause(SIGINT);
-    }"
-   HAVE_SVR3_SIGNALS)  
-   IF (NOT HAVE_SVR3_SIGNALS)
-    SET(HAVE_V7_SIGNALS 1)
-   ENDIF(NOT HAVE_SVR3_SIGNALS)
- ENDIF(NOT HAVE_BSD_SIGNALS)
-ENDIF(NOT HAVE_POSIX_SIGNALS)
+if ( NOT HAVE_POSIX_SIGNALS )
+  check_c_source_compiles ( " #include &lt;signal.h&gt; int main(int ac, char **av) { int mask = sigmask(SIGINT); sigsetmask(mask); sigblock(mask); sigpause(mask); }" 
+    HAVE_BSD_SIGNALS )
+  if ( NOT HAVE_BSD_SIGNALS )
+    check_c_source_compiles ( " #include &lt;signal.h&gt; void foo() { } int main(int ac, char **av) { int mask = sigmask(SIGINT); sigset(SIGINT, foo); sigrelse(SIGINT); sighold(SIGINT); sigpause(SIGINT); }" 
+      HAVE_SVR3_SIGNALS )
+    if ( NOT HAVE_SVR3_SIGNALS )
+      set ( HAVE_V7_SIGNALS 1 )
+    endif ( NOT HAVE_SVR3_SIGNALS )
+  endif ( NOT HAVE_BSD_SIGNALS )
+endif ( NOT HAVE_POSIX_SIGNALS )
 
 # Assume regular sprintf
-SET(SPRINTFS_RETURNS_INT 1)
+set ( SPRINTFS_RETURNS_INT 1 )
 
-IF(CMAKE_COMPILER_IS_GNUCXX AND HAVE_CXXABI_H)
-CHECK_CXX_SOURCE_COMPILES("
- #include &lt;cxxabi.h&gt;
- int main(int argc, char **argv) 
-  {
-    char *foo= 0; int bar= 0;
-    foo= abi::__cxa_demangle(foo, foo, 0, &amp;bar);
-    return 0;
-  }"
-  HAVE_ABI_CXA_DEMANGLE)
-ENDIF()
+if ( CMAKE_COMPILER_IS_GNUCXX AND HAVE_CXXABI_H )
+  check_cxx_source_compiles ( " #include &lt;cxxabi.h&gt; int main(int argc, char **argv) { char *foo= 0; int bar= 0; foo= abi::__cxa_demangle(foo, foo, 0, &amp;bar); return 0; }" 
+    HAVE_ABI_CXA_DEMANGLE )
+endif ( )
 
-CHECK_C_SOURCE_COMPILES("
-  int main(int argc, char **argv) 
-  {
-    extern char *__bss_start;
-    return __bss_start ? 1 : 0;
-  }"
-HAVE_BSS_START)
+check_c_source_compiles ( " int main(int argc, char **argv) { extern char *__bss_start; return __bss_start ? 1 : 0; }" 
+  HAVE_BSS_START )
 
-CHECK_C_SOURCE_COMPILES("
-    int main()
-    {
-      extern void __attribute__((weak)) foo(void);
-      return 0;
-    }"
-    HAVE_WEAK_SYMBOL
-)
+check_c_source_compiles ( " int main() { extern void __attribute__((weak)) foo(void); return 0; }" 
+  HAVE_WEAK_SYMBOL )
 
+check_cxx_source_compiles ( " #include &lt;new&gt; int main() { char *c = new char; return 0; }" 
+  HAVE_CXX_NEW )
 
-CHECK_CXX_SOURCE_COMPILES("
-    #include &lt;new&gt;
-    int main()
-    {
-      char *c = new char;
-      return 0;
-    }"
-    HAVE_CXX_NEW
-)
+check_cxx_source_compiles ( " #undef inline #if !defined(SCO) &amp;&amp; !defined(__osf__) &amp;&amp; !defined(_REENTRANT) #define _REENTRANT #endif #include &lt;pthread.h&gt; #include &lt;sys/types.h&gt; #include &lt;sys/socket.h&gt; #include &lt;netinet/in.h&gt; #include &lt;arpa/inet.h&gt; #include &lt;netdb.h&gt; int main() { struct hostent *foo = gethostbyaddr_r((const char *) 0, 0, 0, (struct hostent *) 0, (char *) NULL, 0, (int *)0); return 0; } " 
+  HAVE_SOLARIS_STYLE_GETHOST )
 
-CHECK_CXX_SOURCE_COMPILES("
-    #undef inline
-    #if !defined(SCO) &amp;&amp; !defined(__osf__) &amp;&amp; !defined(_REENTRANT)
-    #define _REENTRANT
-    #endif
-    #include &lt;pthread.h&gt;
-    #include &lt;sys/types.h&gt;
-    #include &lt;sys/socket.h&gt;
-    #include &lt;netinet/in.h&gt;
-    #include &lt;arpa/inet.h&gt;
-    #include &lt;netdb.h&gt;
-    int main()
-    {
+check_cxx_source_compiles ( " #undef inline #if !defined(SCO) &amp;&amp; !defined(__osf__) &amp;&amp; !defined(_REENTRANT) #define _REENTRANT #endif #include &lt;pthread.h&gt; #include &lt;sys/types.h&gt; #include &lt;sys/socket.h&gt; #include &lt;netinet/in.h&gt; #include &lt;arpa/inet.h&gt; #include &lt;netdb.h&gt; int main() { int ret = gethostbyname_r((const char *) 0, 	(struct hostent*) 0, (char*) 0, 0, (struct hostent **) 0, (int *) 0); return 0; }" 
+  HAVE_GETHOSTBYNAME_R_GLIBC2_STYLE )
 
-       struct hostent *foo =
-       gethostbyaddr_r((const char *) 0,
-          0, 0, (struct hostent *) 0, (char *) NULL,  0, (int *)0);
-       return 0;
-    }
-  "
-  HAVE_SOLARIS_STYLE_GETHOST)
-
-CHECK_CXX_SOURCE_COMPILES("
-    #undef inline
-    #if !defined(SCO) &amp;&amp; !defined(__osf__) &amp;&amp; !defined(_REENTRANT)
-    #define _REENTRANT
-    #endif
-    #include &lt;pthread.h&gt;
-    #include &lt;sys/types.h&gt;
-    #include &lt;sys/socket.h&gt;
-    #include &lt;netinet/in.h&gt;
-    #include &lt;arpa/inet.h&gt;
-    #include &lt;netdb.h&gt;
-    int main()
-    {
-       int ret = gethostbyname_r((const char *) 0,
-	(struct hostent*) 0, (char*) 0, 0, (struct hostent **) 0, (int *) 0);
-      return 0;
-    }"
-    HAVE_GETHOSTBYNAME_R_GLIBC2_STYLE)
-
-CHECK_CXX_SOURCE_COMPILES("
-    #undef inline
-    #if !defined(SCO) &amp;&amp; !defined(__osf__) &amp;&amp; !defined(_REENTRANT)
-    #define _REENTRANT
-    #endif
-    #include &lt;pthread.h&gt;
-    #include &lt;sys/types.h&gt;
-    #include &lt;sys/socket.h&gt;
-    #include &lt;netinet/in.h&gt;
-    #include &lt;arpa/inet.h&gt;
-    #include &lt;netdb.h&gt;
-    int main()
-    {
-      int ret = gethostbyname_r((const char *) 0, (struct hostent*) 0, (struct hostent_data*) 0);
-      return 0;
-    }"
-    HAVE_GETHOSTBYNAME_R_RETURN_INT)
-
+check_cxx_source_compiles ( " #undef inline #if !defined(SCO) &amp;&amp; !defined(__osf__) &amp;&amp; !defined(_REENTRANT) #define _REENTRANT #endif #include &lt;pthread.h&gt; #include &lt;sys/types.h&gt; #include &lt;sys/socket.h&gt; #include &lt;netinet/in.h&gt; #include &lt;arpa/inet.h&gt; #include &lt;netdb.h&gt; int main() { int ret = gethostbyname_r((const char *) 0, (struct hostent*) 0, (struct hostent_data*) 0); return 0; }" 
+  HAVE_GETHOSTBYNAME_R_RETURN_INT )
 
 # Use of ALARMs to wakeup on timeout on sockets
 #
@@ -927,144 +704,98 @@ CHECK_CXX_SOURCE_COMPILES("
 # See Bug#29093 for the problem with SO_SND/RCVTIMEO on HP/UX.
 # To use alarm is simple, simply avoid setting anything.
 
-IF(WIN32)
-  SET(HAVE_SOCKET_TIMEOUT 1)
-ELSEIF(CMAKE_SYSTEM MATCHES "HP-UX")
-  SET(HAVE_SOCKET_TIMEOUT 0)
-ELSEIF(CMAKE_CROSSCOMPILING)
-  SET(HAVE_SOCKET_TIMEOUT 0)
-ELSE()
-SET(CMAKE_REQUIRED_LIBRARIES ${LIBNSL} ${LIBSOCKET}) 
-CHECK_C_SOURCE_RUNS(
-"
- #include &lt;sys/types.h&gt;
- #include &lt;sys/socket.h&gt;
- #include &lt;sys/time.h&gt;
- 
- int main()
- {    
-   int fd = socket(AF_INET, SOCK_STREAM, 0);
-   struct timeval tv;
-   int ret= 0;
-   tv.tv_sec= 2;
-   tv.tv_usec= 0;
-   ret|= setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &amp;tv, sizeof(tv));
-   ret|= setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &amp;tv, sizeof(tv));
-   return !!ret;
- }
-" HAVE_SOCKET_TIMEOUT)
-ENDIF()
+if ( WIN32 )
+  set ( HAVE_SOCKET_TIMEOUT 1 )
+elseif ( CMAKE_SYSTEM MATCHES "HP-UX" )
+set ( HAVE_SOCKET_TIMEOUT 0 )
+elseif ( CMAKE_CROSSCOMPILING )
+set ( HAVE_SOCKET_TIMEOUT 0 )
+else ( )
+  set ( CMAKE_REQUIRED_LIBRARIES ${LIBNSL} ${LIBSOCKET} )
+  check_c_source_runs ( " #include &lt;sys/types.h&gt; #include &lt;sys/socket.h&gt; #include &lt;sys/time.h&gt; int main() { int fd = socket(AF_INET, SOCK_STREAM, 0); struct timeval tv; int ret= 0; tv.tv_sec= 2; tv.tv_usec= 0; ret|= setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &amp;tv, sizeof(tv)); ret|= setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &amp;tv, sizeof(tv)); return !!ret; } " 
+    HAVE_SOCKET_TIMEOUT )
+endif ( )
 
-SET(NO_ALARM "${HAVE_SOCKET_TIMEOUT}" CACHE BOOL 
-   "No need to use alarm to implement socket timeout")
-SET(SIGNAL_WITH_VIO_CLOSE "${HAVE_SOCKET_TIMEOUT}")
-MARK_AS_ADVANCED(NO_ALARM)
+set ( NO_ALARM "${HAVE_SOCKET_TIMEOUT}" CACHE BOOL "No need to use alarm to implement socket timeout" )
+set ( SIGNAL_WITH_VIO_CLOSE "${HAVE_SOCKET_TIMEOUT}" )
+mark_as_advanced ( NO_ALARM )
 
+if ( CMAKE_COMPILER_IS_GNUCXX )
+  if ( WITH_ATOMIC_OPS STREQUAL "up" )
+    set ( MY_ATOMIC_MODE_DUMMY 1 CACHE BOOL "Assume single-CPU mode, no concurrency" )
+  elseif ( WITH_ATOMIC_OPS STREQUAL "rwlocks" )
+  set ( MY_ATOMIC_MODE_RWLOCK 1 CACHE BOOL "Use pthread rwlocks for atomic ops" )
+  elseif ( WITH_ATOMIC_OPS STREQUAL "smp" )
+  elseif ( NOT WITH_ATOMIC_OPS )
+  check_cxx_source_compiles ( " int main() { int foo= -10; int bar= 10; long long int foo64= -10; long long int bar64= 10; if (!__sync_fetch_and_add(&amp;foo, bar) || foo) return -1; bar= __sync_lock_test_and_set(&amp;foo, bar); if (bar || foo != 10) return -1; bar= __sync_val_compare_and_swap(&amp;bar, foo, 15); if (bar) return -1; if (!__sync_fetch_and_add(&amp;foo64, bar64) || foo64) return -1; bar64= __sync_lock_test_and_set(&amp;foo64, bar64); if (bar64 || foo64 != 10) return -1; bar64= __sync_val_compare_and_swap(&amp;bar64, foo, 15); if (bar64) return -1; return 0; }" 
+    HAVE_GCC_ATOMIC_BUILTINS )
+  else ( )
+    message ( FATAL_ERROR "${WITH_ATOMIC_OPS} is not a valid value for WITH_ATOMIC_OPS!" )
+  endif ( )
+endif ( )
 
-IF(CMAKE_COMPILER_IS_GNUCXX)
-IF(WITH_ATOMIC_OPS STREQUAL "up")
-  SET(MY_ATOMIC_MODE_DUMMY 1 CACHE BOOL "Assume single-CPU mode, no concurrency")
-ELSEIF(WITH_ATOMIC_OPS STREQUAL "rwlocks")
-  SET(MY_ATOMIC_MODE_RWLOCK 1 CACHE BOOL "Use pthread rwlocks for atomic ops")
-ELSEIF(WITH_ATOMIC_OPS STREQUAL "smp")
-ELSEIF(NOT WITH_ATOMIC_OPS)
-  CHECK_CXX_SOURCE_COMPILES("
-  int main()
-  {
-    int foo= -10; int bar= 10;
-    long long int foo64= -10; long long int bar64= 10;
-    if (!__sync_fetch_and_add(&amp;foo, bar) || foo)
-      return -1;
-    bar= __sync_lock_test_and_set(&amp;foo, bar);
-    if (bar || foo != 10)
-      return -1;
-    bar= __sync_val_compare_and_swap(&amp;bar, foo, 15);
-    if (bar)
-      return -1;
-    if (!__sync_fetch_and_add(&amp;foo64, bar64) || foo64)
-      return -1;
-    bar64= __sync_lock_test_and_set(&amp;foo64, bar64);
-    if (bar64 || foo64 != 10)
-      return -1;
-    bar64= __sync_val_compare_and_swap(&amp;bar64, foo, 15);
-    if (bar64)
-      return -1;
-    return 0;
-  }"
-  HAVE_GCC_ATOMIC_BUILTINS)
-ELSE()
-  MESSAGE(FATAL_ERROR "${WITH_ATOMIC_OPS} is not a valid value for WITH_ATOMIC_OPS!")
-ENDIF()
-ENDIF()
+set ( WITH_ATOMIC_LOCKS "${WITH_ATOMIC_LOCKS}" CACHE STRING "Implement atomic operations using pthread rwlocks or atomic CPU instructions for multi-processor or uniprocessor configuration. By default gcc built-in sync functions are used, if available and 'smp' configuration otherwise." )
+mark_as_advanced ( WITH_ATOMIC_LOCKS MY_ATOMIC_MODE_RWLOCK MY_ATOMIC_MODE_DUMMY )
 
-SET(WITH_ATOMIC_LOCKS "${WITH_ATOMIC_LOCKS}" CACHE STRING
-"Implement atomic operations using pthread rwlocks or atomic CPU
-instructions for multi-processor or uniprocessor
-configuration. By default gcc built-in sync functions are used,
-if available and 'smp' configuration otherwise.")
-MARK_AS_ADVANCED(WITH_ATOMIC_LOCKS MY_ATOMIC_MODE_RWLOCK MY_ATOMIC_MODE_DUMMY)
-
-IF(WITH_VALGRIND)
-  CHECK_INCLUDE_FILES("valgrind/memcheck.h;valgrind/valgrind.h" 
-    HAVE_VALGRIND_HEADERS)
-  IF(HAVE_VALGRIND_HEADERS)
-    SET(HAVE_VALGRIND 1)
-  ENDIF()
-ENDIF()
+if ( WITH_VALGRIND )
+  check_include_files ( "valgrind/memcheck.h;valgrind/valgrind.h" HAVE_VALGRIND_HEADERS )
+  if ( HAVE_VALGRIND_HEADERS )
+    set ( HAVE_VALGRIND 1 )
+  endif ( )
+endif ( )
 
 #--------------------------------------------------------------------
 # Check for IPv6 support
 #--------------------------------------------------------------------
-CHECK_INCLUDE_FILE(netinet/in6.h HAVE_NETINET_IN6_H)
+check_include_file ( netinet/in6.h HAVE_NETINET_IN6_H )
 
-IF(UNIX)
-  SET(CMAKE_EXTRA_INCLUDE_FILES sys/types.h netinet/in.h sys/socket.h netdb.h)
-  IF(HAVE_NETINET_IN6_H)
-    SET(CMAKE_EXTRA_INCLUDE_FILES ${CMAKE_EXTRA_INCLUDE_FILES} netinet/in6.h)
-  ENDIF()
-ELSEIF(WIN32)
-  SET(CMAKE_EXTRA_INCLUDE_FILES ${CMAKE_EXTRA_INCLUDE_FILES} winsock2.h ws2ipdef.h)
-ENDIF()
+if ( UNIX )
+  set ( CMAKE_EXTRA_INCLUDE_FILES sys/types.h netinet/in.h sys/socket.h netdb.h )
+  if ( HAVE_NETINET_IN6_H )
+    set ( CMAKE_EXTRA_INCLUDE_FILES ${CMAKE_EXTRA_INCLUDE_FILES} netinet/in6.h )
+  endif ( )
+elseif ( WIN32 )
+set ( CMAKE_EXTRA_INCLUDE_FILES ${CMAKE_EXTRA_INCLUDE_FILES} winsock2.h ws2ipdef.h )
+endif ( )
 
-MY_CHECK_STRUCT_SIZE("sockaddr_in6" SOCKADDR_IN6)
-MY_CHECK_STRUCT_SIZE("in6_addr" IN6_ADDR)
-MY_CHECK_STRUCT_SIZE("addrinfo" ADDRINFO)
-MY_CHECK_STRUCT_SIZE("sockaddr_storage" SOCKADDR_STORAGE)
+my_check_struct_size ( "sockaddr_in6" SOCKADDR_IN6 )
+my_check_struct_size ( "in6_addr" IN6_ADDR )
+my_check_struct_size ( "addrinfo" ADDRINFO )
+my_check_struct_size ( "sockaddr_storage" SOCKADDR_STORAGE )
 
-IF(HAVE_STRUCT_SOCKADDR_IN6 OR HAVE_STRUCT_IN6_ADDR)
-  SET(HAVE_IPV6 TRUE CACHE INTERNAL "")
-ENDIF()
-
+if ( HAVE_STRUCT_SOCKADDR_IN6 OR HAVE_STRUCT_IN6_ADDR )
+  set ( HAVE_IPV6 TRUE CACHE INTERNAL "" )
+endif ( )
 
 # Check for sockaddr_storage.ss_family
 # It is called differently under OS400 and older AIX
-CHECK_STRUCT_HAS_MEMBER("struct sockaddr_storage"
- ss_family "${CMAKE_EXTRA_INCLUDE_FILES}" HAVE_SOCKADDR_STORAGE_SS_FAMILY)
-IF(NOT HAVE_SOCKADDR_STORAGE_SS_FAMILY)
-  CHECK_STRUCT_HAS_MEMBER("struct sockaddr_storage"
-  __ss_family "${CMAKE_EXTRA_INCLUDE_FILES}" HAVE_SOCKADDR_STORAGE___SS_FAMILY)
-  IF(HAVE_SOCKADDR_STORAGE___SS_FAMILY)
-    SET(ss_family __ss_family)
-  ENDIF()
-ENDIF()
-set (HAVE_STRUCT_SOCKADDR_STORAGE_SS_FAMILY ${HAVE_SOCKADDR_STORAGE_SS_FAMILY})
-set (HAVE_STRUCT_SOCKADDR_STORAGE___SS_FAMILY ${HAVE_SOCKADDR_STORAGE___SS_FAMILY})
+check_struct_has_member ( "struct sockaddr_storage" ss_family "${CMAKE_EXTRA_INCLUDE_FILES}" 
+  HAVE_SOCKADDR_STORAGE_SS_FAMILY )
+if ( NOT HAVE_SOCKADDR_STORAGE_SS_FAMILY )
+  check_struct_has_member ( "struct sockaddr_storage" __ss_family "${CMAKE_EXTRA_INCLUDE_FILES}" 
+    HAVE_SOCKADDR_STORAGE___SS_FAMILY )
+  if ( HAVE_SOCKADDR_STORAGE___SS_FAMILY )
+    set ( ss_family __ss_family )
+  endif ( )
+endif ( )
+set ( HAVE_STRUCT_SOCKADDR_STORAGE_SS_FAMILY ${HAVE_SOCKADDR_STORAGE_SS_FAMILY} )
+set ( HAVE_STRUCT_SOCKADDR_STORAGE___SS_FAMILY ${HAVE_SOCKADDR_STORAGE___SS_FAMILY} )
 #
 # Check if struct sockaddr_in::sin_len is available.
 #
 
-CHECK_STRUCT_HAS_MEMBER("struct sockaddr_in" sin_len
-  "${CMAKE_EXTRA_INCLUDE_FILES}" HAVE_SOCKADDR_IN_SIN_LEN)
+check_struct_has_member ( "struct sockaddr_in" sin_len "${CMAKE_EXTRA_INCLUDE_FILES}" 
+  HAVE_SOCKADDR_IN_SIN_LEN )
 
 #
 # Check if struct sockaddr_in6::sin6_len is available.
 #
 
-CHECK_STRUCT_HAS_MEMBER("struct sockaddr_in6" sin6_len
-  "${CMAKE_EXTRA_INCLUDE_FILES}" HAVE_SOCKADDR_IN6_SIN6_LEN)
+check_struct_has_member ( "struct sockaddr_in6" sin6_len "${CMAKE_EXTRA_INCLUDE_FILES}" 
+  HAVE_SOCKADDR_IN6_SIN6_LEN )
 
-SET(CMAKE_EXTRA_INCLUDE_FILES) 
+set ( CMAKE_EXTRA_INCLUDE_FILES )
 
-CHECK_STRUCT_HAS_MEMBER("struct dirent" d_ino "dirent.h"  STRUCT_DIRENT_HAS_D_INO)
-CHECK_STRUCT_HAS_MEMBER("struct dirent" d_namlen "dirent.h"  STRUCT_DIRENT_HAS_D_NAMLEN)
-SET(SPRINTF_RETURNS_INT 1)
+check_struct_has_member ( "struct dirent" d_ino "dirent.h" STRUCT_DIRENT_HAS_D_INO )
+check_struct_has_member ( "struct dirent" d_namlen "dirent.h" STRUCT_DIRENT_HAS_D_NAMLEN )
+set ( SPRINTF_RETURNS_INT 1 )
