@@ -5,7 +5,7 @@
  *	  along with the relation's initial contents.
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/catalog/pg_aggregate.h
@@ -44,7 +44,10 @@ CATALOG(pg_aggregate,2600) BKI_WITHOUT_OIDS
 	regproc		aggfinalfn;
 	Oid			aggsortop;
 	Oid			aggtranstype;
-	text		agginitval;		/* VARIABLE LENGTH FIELD */
+
+#ifdef CATALOG_VARLEN			/* variable-length fields start here */
+	text		agginitval;
+#endif
 } FormData_pg_aggregate;
 
 /* ----------------
@@ -203,9 +206,9 @@ DATA(insert ( 2828	float8_regr_accum	float8_covar_samp		0	1022	"{0,0,0,0,0,0}" )
 DATA(insert ( 2829	float8_regr_accum	float8_corr				0	1022	"{0,0,0,0,0,0}" ));
 
 /* boolean-and and boolean-or */
-DATA(insert ( 2517	booland_statefunc	-			0	16		_null_ ));
-DATA(insert ( 2518	boolor_statefunc	-			0	16		_null_ ));
-DATA(insert ( 2519	booland_statefunc	-			0	16		_null_ ));
+DATA(insert ( 2517	booland_statefunc	-			58	16		_null_ ));
+DATA(insert ( 2518	boolor_statefunc	-			59	16		_null_ ));
+DATA(insert ( 2519	booland_statefunc	-			58	16		_null_ ));
 
 /* bitwise integer */
 DATA(insert ( 2236 int2and		  -					0	21		_null_ ));
@@ -225,6 +228,9 @@ DATA(insert ( 2335	array_agg_transfn	array_agg_finalfn		0	2281	_null_ ));
 
 /* text */
 DATA(insert ( 3538	string_agg_transfn	string_agg_finalfn		0	2281	_null_ ));
+
+/* bytea */
+DATA(insert ( 3545	bytea_string_agg_transfn	bytea_string_agg_finalfn		0	2281	_null_ ));
 
 /*
  * prototypes for functions in pg_aggregate.c

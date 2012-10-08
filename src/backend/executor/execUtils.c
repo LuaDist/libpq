@@ -3,7 +3,7 @@
  * execUtils.c
  *	  miscellaneous executor utility routines
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -42,8 +42,6 @@
 
 #include "postgres.h"
 
-#include "access/genam.h"
-#include "access/heapam.h"
 #include "access/relscan.h"
 #include "access/transam.h"
 #include "catalog/index.h"
@@ -52,7 +50,6 @@
 #include "parser/parsetree.h"
 #include "storage/lmgr.h"
 #include "utils/memutils.h"
-#include "utils/relcache.h"
 #include "utils/tqual.h"
 
 
@@ -140,8 +137,6 @@ CreateExecutorState(void)
 
 	estate->es_top_eflags = 0;
 	estate->es_instrument = 0;
-	estate->es_select_into = false;
-	estate->es_into_oids = false;
 	estate->es_finished = false;
 
 	estate->es_exprcontexts = NIL;
@@ -529,8 +524,8 @@ ExecBuildProjectionInfo(List *targetList,
 	 * We separate the target list elements into simple Var references and
 	 * expressions which require the full ExecTargetList machinery.  To be a
 	 * simple Var, a Var has to be a user attribute and not mismatch the
-	 * inputDesc.  (Note: if there is a type mismatch then ExecEvalVar will
-	 * probably throw an error at runtime, but we leave that to it.)
+	 * inputDesc.  (Note: if there is a type mismatch then ExecEvalScalarVar
+	 * will probably throw an error at runtime, but we leave that to it.)
 	 */
 	exprlist = NIL;
 	numSimpleVars = 0;
@@ -569,19 +564,21 @@ ExecBuildProjectionInfo(List *targetList,
 
 			switch (variable->varno)
 			{
-				case INNER:
+				case INNER_VAR:
 					varSlotOffsets[numSimpleVars] = offsetof(ExprContext,
 															 ecxt_innertuple);
 					if (projInfo->pi_lastInnerVar < attnum)
 						projInfo->pi_lastInnerVar = attnum;
 					break;
 
-				case OUTER:
+				case OUTER_VAR:
 					varSlotOffsets[numSimpleVars] = offsetof(ExprContext,
 															 ecxt_outertuple);
 					if (projInfo->pi_lastOuterVar < attnum)
 						projInfo->pi_lastOuterVar = attnum;
 					break;
+
+					/* INDEX_VAR is handled by default case */
 
 				default:
 					varSlotOffsets[numSimpleVars] = offsetof(ExprContext,
@@ -631,15 +628,17 @@ get_last_attnums(Node *node, ProjectionInfo *projInfo)
 
 		switch (variable->varno)
 		{
-			case INNER:
+			case INNER_VAR:
 				if (projInfo->pi_lastInnerVar < attnum)
 					projInfo->pi_lastInnerVar = attnum;
 				break;
 
-			case OUTER:
+			case OUTER_VAR:
 				if (projInfo->pi_lastOuterVar < attnum)
 					projInfo->pi_lastOuterVar = attnum;
 				break;
+
+				/* INDEX_VAR is handled by default case */
 
 			default:
 				if (projInfo->pi_lastScanVar < attnum)

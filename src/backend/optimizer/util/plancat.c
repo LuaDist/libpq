@@ -4,7 +4,7 @@
  *	   routines for accessing the system catalogs
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -22,9 +22,9 @@
 #include "access/sysattr.h"
 #include "access/transam.h"
 #include "catalog/catalog.h"
+#include "catalog/heap.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
-#include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
 #include "optimizer/plancat.h"
@@ -50,6 +50,8 @@ static int32 get_rel_data_width(Relation rel, int32 *attr_widths);
 static List *get_relation_constraints(PlannerInfo *root,
 						 Oid relationObjectId, RelOptInfo *rel,
 						 bool include_notnull);
+static List *build_index_tlist(PlannerInfo *root, IndexOptInfo *index,
+				  Relation heapRelation);
 
 
 /*
@@ -114,7 +116,7 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 	 */
 	if (!inhparent)
 		estimate_rel_size(relation, rel->attr_widths - rel->min_attr,
-						  &rel->pages, &rel->tuples);
+						  &rel->pages, &rel->tuples, &rel->allvisfrac);
 
 	/*
 	 * Make list of indexes.  Ignore indexes on system catalogs if told to.
@@ -210,8 +212,10 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 
 			info->relam = indexRelation->rd_rel->relam;
 			info->amcostestimate = indexRelation->rd_am->amcostestimate;
+			info->canreturn = index_can_return(indexRelation);
 			info->amcanorderbyop = indexRelation->rd_am->amcanorderbyop;
 			info->amoptionalkey = indexRelation->rd_am->amoptionalkey;
+			info->amsearcharray = indexRelation->rd_am->amsearcharray;
 			info->amsearchnulls = indexRelation->rd_am->amsearchnulls;
 			info->amhasgettuple = OidIsValid(indexRelation->rd_am->amgettuple);
 			info->amhasgetbitmap = OidIsValid(indexRelation->rd_am->amgetbitmap);
@@ -314,8 +318,13 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 				ChangeVarNodes((Node *) info->indexprs, 1, varno, 0);
 			if (info->indpred && varno != 1)
 				ChangeVarNodes((Node *) info->indpred, 1, varno, 0);
+
+			/* Build targetlist using the completed indexprs data */
+			info->indextlist = build_index_tlist(root, info, relation);
+
 			info->predOK = false;		/* set later in indxpath.c */
 			info->unique = index->indisunique;
+			info->immediate = index->indimmediate;
 			info->hypothetical = false;
 
 			/*
@@ -332,8 +341,10 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 			}
 			else
 			{
+				double		allvisfrac; /* dummy */
+
 				estimate_rel_size(indexRelation, NULL,
-								  &info->pages, &info->tuples);
+								  &info->pages, &info->tuples, &allvisfrac);
 				if (info->tuples > rel->tuples)
 					info->tuples = rel->tuples;
 			}
@@ -362,17 +373,21 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 /*
  * estimate_rel_size - estimate # pages and # tuples in a table or index
  *
+ * We also estimate the fraction of the pages that are marked all-visible in
+ * the visibility map, for use in estimation of index-only scans.
+ *
  * If attr_widths isn't NULL, it points to the zero-index entry of the
  * relation's attr_widths[] cache; we fill this in if we have need to compute
  * the attribute widths for estimation purposes.
  */
 void
 estimate_rel_size(Relation rel, int32 *attr_widths,
-				  BlockNumber *pages, double *tuples)
+				  BlockNumber *pages, double *tuples, double *allvisfrac)
 {
 	BlockNumber curpages;
 	BlockNumber relpages;
 	double		reltuples;
+	BlockNumber relallvisible;
 	double		density;
 
 	switch (rel->rd_rel->relkind)
@@ -388,12 +403,12 @@ estimate_rel_size(Relation rel, int32 *attr_widths,
 			 * minimum size estimate of 10 pages.  The idea here is to avoid
 			 * assuming a newly-created table is really small, even if it
 			 * currently is, because that may not be true once some data gets
-			 * loaded into it.  Once a vacuum or analyze cycle has been done
+			 * loaded into it.	Once a vacuum or analyze cycle has been done
 			 * on it, it's more reasonable to believe the size is somewhat
 			 * stable.
 			 *
 			 * (Note that this is only an issue if the plan gets cached and
-			 * used again after the table has been filled.  What we're trying
+			 * used again after the table has been filled.	What we're trying
 			 * to avoid is using a nestloop-type plan on a table that has
 			 * grown substantially since the plan was made.  Normally,
 			 * autovacuum/autoanalyze will occur once enough inserts have
@@ -425,11 +440,13 @@ estimate_rel_size(Relation rel, int32 *attr_widths,
 			if (curpages == 0)
 			{
 				*tuples = 0;
+				*allvisfrac = 0;
 				break;
 			}
 			/* coerce values in pg_class to more desirable types */
 			relpages = (BlockNumber) rel->rd_rel->relpages;
 			reltuples = (double) rel->rd_rel->reltuples;
+			relallvisible = (BlockNumber) rel->rd_rel->relallvisible;
 
 			/*
 			 * If it's an index, discount the metapage while estimating the
@@ -473,21 +490,37 @@ estimate_rel_size(Relation rel, int32 *attr_widths,
 				density = (BLCKSZ - SizeOfPageHeaderData) / tuple_width;
 			}
 			*tuples = rint(density * (double) curpages);
+
+			/*
+			 * We use relallvisible as-is, rather than scaling it up like we
+			 * do for the pages and tuples counts, on the theory that any
+			 * pages added since the last VACUUM are most likely not marked
+			 * all-visible.  But costsize.c wants it converted to a fraction.
+			 */
+			if (relallvisible == 0 || curpages <= 0)
+				*allvisfrac = 0;
+			else if ((double) relallvisible >= curpages)
+				*allvisfrac = 1;
+			else
+				*allvisfrac = (double) relallvisible / curpages;
 			break;
 		case RELKIND_SEQUENCE:
 			/* Sequences always have a known size */
 			*pages = 1;
 			*tuples = 1;
+			*allvisfrac = 0;
 			break;
 		case RELKIND_FOREIGN_TABLE:
 			/* Just use whatever's in pg_class */
 			*pages = rel->rd_rel->relpages;
 			*tuples = rel->rd_rel->reltuples;
+			*allvisfrac = 0;
 			break;
 		default:
 			/* else it has no disk storage; probably shouldn't get here? */
 			*pages = 0;
 			*tuples = 0;
+			*allvisfrac = 0;
 			break;
 	}
 }
@@ -568,7 +601,7 @@ get_relation_data_width(Oid relid, int32 *attr_widths)
 /*
  * get_relation_constraints
  *
- * Retrieve the CHECK constraint expressions of the given relation.
+ * Retrieve the validated CHECK constraint expressions of the given relation.
  *
  * Returns a List (possibly empty) of constraint expressions.  Each one
  * has been canonicalized, and its Vars are changed to have the varno
@@ -606,6 +639,13 @@ get_relation_constraints(PlannerInfo *root,
 		for (i = 0; i < num_check; i++)
 		{
 			Node	   *cexpr;
+
+			/*
+			 * If this constraint hasn't been fully validated yet, we must
+			 * ignore it here.
+			 */
+			if (!constr->check[i].ccvalid)
+				continue;
 
 			cexpr = stringToNode(constr->check[i].ccbin);
 
@@ -679,7 +719,7 @@ get_relation_constraints(PlannerInfo *root,
  *
  * Detect whether the relation need not be scanned because it has either
  * self-inconsistent restrictions, or restrictions inconsistent with the
- * relation's CHECK constraints.
+ * relation's validated CHECK constraints.
  *
  * Note: this examines only rel->relid, rel->reloptkind, and
  * rel->baserestrictinfo; therefore it can be called before filling in
@@ -894,6 +934,70 @@ build_physical_tlist(PlannerInfo *root, RelOptInfo *rel)
 }
 
 /*
+ * build_index_tlist
+ *
+ * Build a targetlist representing the columns of the specified index.
+ * Each column is represented by a Var for the corresponding base-relation
+ * column, or an expression in base-relation Vars, as appropriate.
+ *
+ * There are never any dropped columns in indexes, so unlike
+ * build_physical_tlist, we need no failure case.
+ */
+static List *
+build_index_tlist(PlannerInfo *root, IndexOptInfo *index,
+				  Relation heapRelation)
+{
+	List	   *tlist = NIL;
+	Index		varno = index->rel->relid;
+	ListCell   *indexpr_item;
+	int			i;
+
+	indexpr_item = list_head(index->indexprs);
+	for (i = 0; i < index->ncolumns; i++)
+	{
+		int			indexkey = index->indexkeys[i];
+		Expr	   *indexvar;
+
+		if (indexkey != 0)
+		{
+			/* simple column */
+			Form_pg_attribute att_tup;
+
+			if (indexkey < 0)
+				att_tup = SystemAttributeDefinition(indexkey,
+										   heapRelation->rd_rel->relhasoids);
+			else
+				att_tup = heapRelation->rd_att->attrs[indexkey - 1];
+
+			indexvar = (Expr *) makeVar(varno,
+										indexkey,
+										att_tup->atttypid,
+										att_tup->atttypmod,
+										att_tup->attcollation,
+										0);
+		}
+		else
+		{
+			/* expression column */
+			if (indexpr_item == NULL)
+				elog(ERROR, "wrong number of index expressions");
+			indexvar = (Expr *) lfirst(indexpr_item);
+			indexpr_item = lnext(indexpr_item);
+		}
+
+		tlist = lappend(tlist,
+						makeTargetEntry(indexvar,
+										i + 1,
+										NULL,
+										false));
+	}
+	if (indexpr_item != NULL)
+		elog(ERROR, "wrong number of index expressions");
+
+	return tlist;
+}
+
+/*
  * restriction_selectivity
  *
  * Returns the selectivity of a specified restriction operator clause.
@@ -906,6 +1010,7 @@ Selectivity
 restriction_selectivity(PlannerInfo *root,
 						Oid operatorid,
 						List *args,
+						Oid inputcollid,
 						int varRelid)
 {
 	RegProcedure oprrest = get_oprrest(operatorid);
@@ -918,11 +1023,12 @@ restriction_selectivity(PlannerInfo *root,
 	if (!oprrest)
 		return (Selectivity) 0.5;
 
-	result = DatumGetFloat8(OidFunctionCall4(oprrest,
-											 PointerGetDatum(root),
-											 ObjectIdGetDatum(operatorid),
-											 PointerGetDatum(args),
-											 Int32GetDatum(varRelid)));
+	result = DatumGetFloat8(OidFunctionCall4Coll(oprrest,
+												 inputcollid,
+												 PointerGetDatum(root),
+												 ObjectIdGetDatum(operatorid),
+												 PointerGetDatum(args),
+												 Int32GetDatum(varRelid)));
 
 	if (result < 0.0 || result > 1.0)
 		elog(ERROR, "invalid restriction selectivity: %f", result);
@@ -941,6 +1047,7 @@ Selectivity
 join_selectivity(PlannerInfo *root,
 				 Oid operatorid,
 				 List *args,
+				 Oid inputcollid,
 				 JoinType jointype,
 				 SpecialJoinInfo *sjinfo)
 {
@@ -954,12 +1061,13 @@ join_selectivity(PlannerInfo *root,
 	if (!oprjoin)
 		return (Selectivity) 0.5;
 
-	result = DatumGetFloat8(OidFunctionCall5(oprjoin,
-											 PointerGetDatum(root),
-											 ObjectIdGetDatum(operatorid),
-											 PointerGetDatum(args),
-											 Int16GetDatum(jointype),
-											 PointerGetDatum(sjinfo)));
+	result = DatumGetFloat8(OidFunctionCall5Coll(oprjoin,
+												 inputcollid,
+												 PointerGetDatum(root),
+												 ObjectIdGetDatum(operatorid),
+												 PointerGetDatum(args),
+												 Int16GetDatum(jointype),
+												 PointerGetDatum(sjinfo)));
 
 	if (result < 0.0 || result > 1.0)
 		elog(ERROR, "invalid join selectivity: %f", result);
@@ -973,6 +1081,11 @@ join_selectivity(PlannerInfo *root,
  * Detect whether there is a unique index on the specified attribute
  * of the specified relation, thus allowing us to conclude that all
  * the (non-null) values of the attribute are distinct.
+ *
+ * This function does not check the index's indimmediate property, which
+ * means that uniqueness may transiently fail to hold intra-transaction.
+ * That's appropriate when we are making statistical estimates, but beware
+ * of using this for any correctness proofs.
  */
 bool
 has_unique_index(RelOptInfo *rel, AttrNumber attno)

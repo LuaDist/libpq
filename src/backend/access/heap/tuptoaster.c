@@ -4,7 +4,7 @@
  *	  Support routines for external and compressed storage of
  *	  variable size attributes.
  *
- * Copyright (c) 2000-2011, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2012, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -75,8 +75,9 @@ do { \
 
 static void toast_delete_datum(Relation rel, Datum value);
 static Datum toast_save_datum(Relation rel, Datum value,
-				 struct varlena *oldexternal, int options);
-static bool toast_valueid_exists(Oid toastrelid, Oid valueid);
+				 struct varlena * oldexternal, int options);
+static bool toastrel_valueid_exists(Relation toastrel, Oid valueid);
+static bool toastid_valueid_exists(Oid toastrelid, Oid valueid);
 static struct varlena *toast_fetch_datum(struct varlena * attr);
 static struct varlena *toast_fetch_datum_slice(struct varlena * attr,
 						int32 sliceoffset, int32 length);
@@ -597,7 +598,6 @@ toast_insert_or_update(Relation rel, HeapTuple newtup, HeapTuple oldtup,
 	if (newtup->t_data->t_infomask & HEAP_HASOID)
 		hoff += sizeof(Oid);
 	hoff = MAXALIGN(hoff);
-	Assert(hoff == newtup->t_data->t_hoff);
 	/* now convert to a limit on the tuple data size */
 	maxDataLen = TOAST_TUPLE_TARGET - hoff;
 
@@ -864,43 +864,54 @@ toast_insert_or_update(Relation rel, HeapTuple newtup, HeapTuple oldtup,
 	{
 		HeapTupleHeader olddata = newtup->t_data;
 		HeapTupleHeader new_data;
-		int32		new_len;
+		int32		new_header_len;
 		int32		new_data_len;
+		int32		new_tuple_len;
 
 		/*
-		 * Calculate the new size of the tuple.  Header size should not
-		 * change, but data size might.
+		 * Calculate the new size of the tuple.
+		 *
+		 * Note: we used to assume here that the old tuple's t_hoff must equal
+		 * the new_header_len value, but that was incorrect.  The old tuple
+		 * might have a smaller-than-current natts, if there's been an ALTER
+		 * TABLE ADD COLUMN since it was stored; and that would lead to a
+		 * different conclusion about the size of the null bitmap, or even
+		 * whether there needs to be one at all.
 		 */
-		new_len = offsetof(HeapTupleHeaderData, t_bits);
+		new_header_len = offsetof(HeapTupleHeaderData, t_bits);
 		if (has_nulls)
-			new_len += BITMAPLEN(numAttrs);
+			new_header_len += BITMAPLEN(numAttrs);
 		if (olddata->t_infomask & HEAP_HASOID)
-			new_len += sizeof(Oid);
-		new_len = MAXALIGN(new_len);
-		Assert(new_len == olddata->t_hoff);
+			new_header_len += sizeof(Oid);
+		new_header_len = MAXALIGN(new_header_len);
 		new_data_len = heap_compute_data_size(tupleDesc,
 											  toast_values, toast_isnull);
-		new_len += new_data_len;
+		new_tuple_len = new_header_len + new_data_len;
 
 		/*
 		 * Allocate and zero the space needed, and fill HeapTupleData fields.
 		 */
-		result_tuple = (HeapTuple) palloc0(HEAPTUPLESIZE + new_len);
-		result_tuple->t_len = new_len;
+		result_tuple = (HeapTuple) palloc0(HEAPTUPLESIZE + new_tuple_len);
+		result_tuple->t_len = new_tuple_len;
 		result_tuple->t_self = newtup->t_self;
 		result_tuple->t_tableOid = newtup->t_tableOid;
 		new_data = (HeapTupleHeader) ((char *) result_tuple + HEAPTUPLESIZE);
 		result_tuple->t_data = new_data;
 
 		/*
-		 * Put the existing tuple header and the changed values into place
+		 * Copy the existing tuple header, but adjust natts and t_hoff.
 		 */
-		memcpy(new_data, olddata, olddata->t_hoff);
+		memcpy(new_data, olddata, offsetof(HeapTupleHeaderData, t_bits));
+		HeapTupleHeaderSetNatts(new_data, numAttrs);
+		new_data->t_hoff = new_header_len;
+		if (olddata->t_infomask & HEAP_HASOID)
+			HeapTupleHeaderSetOid(new_data, HeapTupleHeaderGetOid(olddata));
 
+		/* Copy over the data, and fill the null bitmap if needed */
 		heap_fill_tuple(tupleDesc,
 						toast_values,
 						toast_isnull,
-						(char *) new_data + olddata->t_hoff,
+						(char *) new_data + new_header_len,
 						new_data_len,
 						&(new_data->t_infomask),
 						has_nulls ? new_data->t_bits : NULL);
@@ -929,6 +940,87 @@ toast_insert_or_update(Relation rel, HeapTuple newtup, HeapTuple oldtup,
 
 
 /* ----------
+ * toast_flatten_tuple -
+ *
+ *	"Flatten" a tuple to contain no out-of-line toasted fields.
+ *	(This does not eliminate compressed or short-header datums.)
+ * ----------
+ */
+HeapTuple
+toast_flatten_tuple(HeapTuple tup, TupleDesc tupleDesc)
+{
+	HeapTuple	new_tuple;
+	Form_pg_attribute *att = tupleDesc->attrs;
+	int			numAttrs = tupleDesc->natts;
+	int			i;
+	Datum		toast_values[MaxTupleAttributeNumber];
+	bool		toast_isnull[MaxTupleAttributeNumber];
+	bool		toast_free[MaxTupleAttributeNumber];
+
+	/*
+	 * Break down the tuple into fields.
+	 */
+	Assert(numAttrs <= MaxTupleAttributeNumber);
+	heap_deform_tuple(tup, tupleDesc, toast_values, toast_isnull);
+
+	memset(toast_free, 0, numAttrs * sizeof(bool));
+
+	for (i = 0; i < numAttrs; i++)
+	{
+		/*
+		 * Look at non-null varlena attributes
+		 */
+		if (!toast_isnull[i] && att[i]->attlen == -1)
+		{
+			struct varlena *new_value;
+
+			new_value = (struct varlena *) DatumGetPointer(toast_values[i]);
+			if (VARATT_IS_EXTERNAL(new_value))
+			{
+				new_value = toast_fetch_datum(new_value);
+				toast_values[i] = PointerGetDatum(new_value);
+				toast_free[i] = true;
+			}
+		}
+	}
+
+	/*
+	 * Form the reconfigured tuple.
+	 */
+	new_tuple = heap_form_tuple(tupleDesc, toast_values, toast_isnull);
+
+	/*
+	 * Be sure to copy the tuple's OID and identity fields.  We also make a
+	 * point of copying visibility info, just in case anybody looks at those
+	 * fields in a syscache entry.
+	 */
+	if (tupleDesc->tdhasoid)
+		HeapTupleSetOid(new_tuple, HeapTupleGetOid(tup));
+
+	new_tuple->t_self = tup->t_self;
+	new_tuple->t_tableOid = tup->t_tableOid;
+
+	new_tuple->t_data->t_choice = tup->t_data->t_choice;
+	new_tuple->t_data->t_ctid = tup->t_data->t_ctid;
+	new_tuple->t_data->t_infomask &= ~HEAP_XACT_MASK;
+	new_tuple->t_data->t_infomask |=
+		tup->t_data->t_infomask & HEAP_XACT_MASK;
+	new_tuple->t_data->t_infomask2 &= ~HEAP2_XACT_MASK;
+	new_tuple->t_data->t_infomask2 |=
+		tup->t_data->t_infomask2 & HEAP2_XACT_MASK;
+
+	/*
+	 * Free allocated temp values
+	 */
+	for (i = 0; i < numAttrs; i++)
+		if (toast_free[i])
+			pfree(DatumGetPointer(toast_values[i]));
+
+	return new_tuple;
+}
+
+
+/* ----------
  * toast_flatten_tuple_attribute -
  *
  *	If a Datum is of composite type, "flatten" it to contain no toasted fields.
@@ -947,8 +1039,9 @@ toast_flatten_tuple_attribute(Datum value,
 	TupleDesc	tupleDesc;
 	HeapTupleHeader olddata;
 	HeapTupleHeader new_data;
-	int32		new_len;
+	int32		new_header_len;
 	int32		new_data_len;
+	int32		new_tuple_len;
 	HeapTupleData tmptup;
 	Form_pg_attribute *att;
 	int			numAttrs;
@@ -1019,33 +1112,39 @@ toast_flatten_tuple_attribute(Datum value,
 	}
 
 	/*
-	 * Calculate the new size of the tuple.  Header size should not change,
-	 * but data size might.
+	 * Calculate the new size of the tuple.
+	 *
+	 * This should match the reconstruction code in toast_insert_or_update.
 	 */
-	new_len = offsetof(HeapTupleHeaderData, t_bits);
+	new_header_len = offsetof(HeapTupleHeaderData, t_bits);
 	if (has_nulls)
-		new_len += BITMAPLEN(numAttrs);
+		new_header_len += BITMAPLEN(numAttrs);
 	if (olddata->t_infomask & HEAP_HASOID)
-		new_len += sizeof(Oid);
-	new_len = MAXALIGN(new_len);
-	Assert(new_len == olddata->t_hoff);
+		new_header_len += sizeof(Oid);
+	new_header_len = MAXALIGN(new_header_len);
 	new_data_len = heap_compute_data_size(tupleDesc,
 										  toast_values, toast_isnull);
-	new_len += new_data_len;
+	new_tuple_len = new_header_len + new_data_len;
 
-	new_data = (HeapTupleHeader) palloc0(new_len);
+	new_data = (HeapTupleHeader) palloc0(new_tuple_len);
 
 	/*
-	 * Put the tuple header and the changed values into place
+	 * Copy the existing tuple header, but adjust natts and t_hoff.
 	 */
-	memcpy(new_data, olddata, olddata->t_hoff);
+	memcpy(new_data, olddata, offsetof(HeapTupleHeaderData, t_bits));
+	HeapTupleHeaderSetNatts(new_data, numAttrs);
+	new_data->t_hoff = new_header_len;
+	if (olddata->t_infomask & HEAP_HASOID)
+		HeapTupleHeaderSetOid(new_data, HeapTupleHeaderGetOid(olddata));
 
-	HeapTupleHeaderSetDatumLength(new_data, new_len);
+	/* Reset the datum length field, too */
+	HeapTupleHeaderSetDatumLength(new_data, new_tuple_len);
 
+	/* Copy over the data, and fill the null bitmap if needed */
 	heap_fill_tuple(tupleDesc,
 					toast_values,
 					toast_isnull,
-					(char *) new_data + olddata->t_hoff,
+					(char *) new_data + new_header_len,
 					new_data_len,
 					&(new_data->t_infomask),
 					has_nulls ? new_data->t_bits : NULL);
@@ -1134,7 +1233,7 @@ toast_compress_datum(Datum value)
  */
 static Datum
 toast_save_datum(Relation rel, Datum value,
-				 struct varlena *oldexternal, int options)
+				 struct varlena * oldexternal, int options)
 {
 	Relation	toastrel;
 	Relation	toastidx;
@@ -1244,7 +1343,34 @@ toast_save_datum(Relation rel, Datum value,
 			/* Must copy to access aligned fields */
 			VARATT_EXTERNAL_GET_POINTER(old_toast_pointer, oldexternal);
 			if (old_toast_pointer.va_toastrelid == rel->rd_toastoid)
+			{
+				/* This value came from the old toast table; reuse its OID */
 				toast_pointer.va_valueid = old_toast_pointer.va_valueid;
+
+				/*
+				 * There is a corner case here: the table rewrite might have
+				 * to copy both live and recently-dead versions of a row, and
+				 * those versions could easily reference the same toast value.
+				 * When we copy the second or later version of such a row,
+				 * reusing the OID will mean we select an OID that's already
+				 * in the new toast table.	Check for that, and if so, just
+				 * fall through without writing the data again.
+				 *
+				 * While annoying and ugly-looking, this is a good thing
+				 * because it ensures that we wind up with only one copy of
+				 * the toast value when there is only one copy in the old
+				 * toast table.  Before we detected this case, we'd have made
+				 * multiple copies, wasting space; and what's worse, the
+				 * copies belonging to already-deleted heap tuples would not
+				 * be reclaimed by VACUUM.
+				 */
+				if (toastrel_valueid_exists(toastrel,
+											toast_pointer.va_valueid))
+				{
+					/* Match, so short-circuit the data storage loop below */
+					data_todo = 0;
+				}
+			}
 		}
 		if (toast_pointer.va_valueid == InvalidOid)
 		{
@@ -1258,8 +1384,8 @@ toast_save_datum(Relation rel, Datum value,
 					GetNewOidWithIndex(toastrel,
 									   RelationGetRelid(toastidx),
 									   (AttrNumber) 1);
-			} while (toast_valueid_exists(rel->rd_toastoid,
-										  toast_pointer.va_valueid));
+			} while (toastid_valueid_exists(rel->rd_toastoid,
+											toast_pointer.va_valueid));
 		}
 	}
 
@@ -1397,23 +1523,17 @@ toast_delete_datum(Relation rel, Datum value)
 
 
 /* ----------
- * toast_valueid_exists -
+ * toastrel_valueid_exists -
  *
  *	Test whether a toast value with the given ID exists in the toast relation
  * ----------
  */
 static bool
-toast_valueid_exists(Oid toastrelid, Oid valueid)
+toastrel_valueid_exists(Relation toastrel, Oid valueid)
 {
 	bool		result = false;
-	Relation	toastrel;
 	ScanKeyData toastkey;
 	SysScanDesc toastscan;
-
-	/*
-	 * Open the toast relation
-	 */
-	toastrel = heap_open(toastrelid, AccessShareLock);
 
 	/*
 	 * Setup a scan key to find chunks with matching va_valueid
@@ -1432,10 +1552,27 @@ toast_valueid_exists(Oid toastrelid, Oid valueid)
 	if (systable_getnext(toastscan) != NULL)
 		result = true;
 
-	/*
-	 * End scan and close relations
-	 */
 	systable_endscan(toastscan);
+
+	return result;
+}
+
+/* ----------
+ * toastid_valueid_exists -
+ *
+ *	As above, but work from toast rel's OID not an open relation
+ * ----------
+ */
+static bool
+toastid_valueid_exists(Oid toastrelid, Oid valueid)
+{
+	bool		result;
+	Relation	toastrel;
+
+	toastrel = heap_open(toastrelid, AccessShareLock);
+
+	result = toastrel_valueid_exists(toastrel, valueid);
+
 	heap_close(toastrel, AccessShareLock);
 
 	return result;

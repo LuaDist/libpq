@@ -4,19 +4,27 @@
  *
  * Author: Magnus Hagander <magnus@hagander.net>
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  src/bin/pg_basebackup/pg_basebackup.c
  *-------------------------------------------------------------------------
  */
 
-#include "postgres_fe.h"
+/*
+ * We have to use postgres.h not postgres_fe.h here, because there's so much
+ * backend-only stuff in the XLOG include files we need.  But we need a
+ * frontend-ish environment otherwise.	Hence this ugly hack.
+ */
+#define FRONTEND 1
+#include "postgres.h"
 #include "libpq-fe.h"
 
 #include <unistd.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
 #ifdef HAVE_LIBZ
 #include <zlib.h>
@@ -24,9 +32,11 @@
 
 #include "getopt_long.h"
 
+#include "receivelog.h"
+#include "streamutil.h"
+
 
 /* Global options */
-static const char *progname;
 char	   *basedir = NULL;
 char		format = 'p';		/* p(lain)/t(ar) */
 char	   *label = "pg_basebackup base backup";
@@ -34,41 +44,47 @@ bool		showprogress = false;
 int			verbose = 0;
 int			compresslevel = 0;
 bool		includewal = false;
+bool		streamwal = false;
 bool		fastcheckpoint = false;
-char	   *dbhost = NULL;
-char	   *dbuser = NULL;
-char	   *dbport = NULL;
-int			dbgetpassword = 0;	/* 0=auto, -1=never, 1=always */
+int			standby_message_timeout = 10 * 1000;		/* 10 sec = default */
 
 /* Progress counters */
 static uint64 totalsize;
 static uint64 totaldone;
 static int	tablespacecount;
 
-/* Connection kept global so we can disconnect easily */
-static PGconn *conn = NULL;
+/* Pipe to communicate with background wal receiver process */
+#ifndef WIN32
+static int	bgpipe[2] = {-1, -1};
+#endif
 
-#define disconnect_and_exit(code)				\
-	{											\
-	if (conn != NULL) PQfinish(conn);			\
-	exit(code);									\
-	}
+/* Handle to child process */
+static pid_t bgchild = -1;
+
+/* End position for xlog streaming, empty string if unknown yet */
+static XLogRecPtr xlogendptr;
+
+#ifndef WIN32
+static int	has_xlogendptr = 0;
+#else
+static volatile LONG has_xlogendptr = 0;
+#endif
 
 /* Function headers */
-static char *xstrdup(const char *s);
-static void *xmalloc0(int size);
 static void usage(void);
 static void verify_dir_is_empty_or_create(char *dirname);
 static void progress_report(int tablespacenum, const char *filename);
-static PGconn *GetConnection(void);
 
 static void ReceiveTarFile(PGconn *conn, PGresult *res, int rownum);
 static void ReceiveAndUnpackTarFile(PGconn *conn, PGresult *res, int rownum);
 static void BaseBackup(void);
 
+static bool reached_end_position(XLogRecPtr segendpos, uint32 timeline,
+					 bool segment_finished);
+
 #ifdef HAVE_LIBZ
 static const char *
-get_gz_error(gzFile *gzf)
+get_gz_error(gzFile gzf)
 {
 	int			errnum;
 	const char *errmsg;
@@ -81,40 +97,6 @@ get_gz_error(gzFile *gzf)
 }
 #endif
 
-/*
- * strdup() and malloc() replacements that prints an error and exits
- * if something goes wrong. Can never return NULL.
- */
-static char *
-xstrdup(const char *s)
-{
-	char	   *result;
-
-	result = strdup(s);
-	if (!result)
-	{
-		fprintf(stderr, _("%s: out of memory\n"), progname);
-		exit(1);
-	}
-	return result;
-}
-
-static void *
-xmalloc0(int size)
-{
-	void	   *result;
-
-	result = malloc(size);
-	if (!result)
-	{
-		fprintf(stderr, _("%s: out of memory\n"), progname);
-		exit(1);
-	}
-	MemSet(result, 0, size);
-	return result;
-}
-
-
 static void
 usage(void)
 {
@@ -123,28 +105,232 @@ usage(void)
 	printf(_("Usage:\n"));
 	printf(_("  %s [OPTION]...\n"), progname);
 	printf(_("\nOptions controlling the output:\n"));
-	printf(_("  -D, --pgdata=DIRECTORY   receive base backup into directory\n"));
-	printf(_("  -F, --format=p|t         output format (plain, tar)\n"));
-	printf(_("  -x, --xlog               include required WAL files in backup\n"));
-	printf(_("  -z, --gzip               compress tar output\n"));
-	printf(_("  -Z, --compress=0-9       compress tar output with given compression level\n"));
+	printf(_("  -D, --pgdata=DIRECTORY receive base backup into directory\n"));
+	printf(_("  -F, --format=p|t       output format (plain (default), tar)\n"));
+	printf(_("  -x, --xlog             include required WAL files in backup (fetch mode)\n"));
+	printf(_("  -X, --xlog-method=fetch|stream\n"
+			 "                         include required WAL files with specified method\n"));
+	printf(_("  -z, --gzip             compress tar output\n"));
+	printf(_("  -Z, --compress=0-9     compress tar output with given compression level\n"));
 	printf(_("\nGeneral options:\n"));
 	printf(_("  -c, --checkpoint=fast|spread\n"
-		   "                           set fast or spread checkpointing\n"));
-	printf(_("  -l, --label=LABEL        set backup label\n"));
-	printf(_("  -P, --progress           show progress information\n"));
-	printf(_("  -v, --verbose            output verbose messages\n"));
-	printf(_("  --help                   show this help, then exit\n"));
-	printf(_("  --version                output version information, then exit\n"));
+			 "                         set fast or spread checkpointing\n"));
+	printf(_("  -l, --label=LABEL      set backup label\n"));
+	printf(_("  -P, --progress         show progress information\n"));
+	printf(_("  -v, --verbose          output verbose messages\n"));
+	printf(_("  -V, --version          output version information, then exit\n"));
+	printf(_("  -?, --help             show this help, then exit\n"));
 	printf(_("\nConnection options:\n"));
-	printf(_("  -h, --host=HOSTNAME      database server host or socket directory\n"));
-	printf(_("  -p, --port=PORT          database server port number\n"));
-	printf(_("  -U, --username=NAME      connect as specified database user\n"));
-	printf(_("  -w, --no-password        never prompt for password\n"));
-	printf(_("  -W, --password           force password prompt (should happen automatically)\n"));
+	printf(_("  -h, --host=HOSTNAME    database server host or socket directory\n"));
+	printf(_("  -p, --port=PORT        database server port number\n"));
+	printf(_("  -s, --status-interval=INTERVAL\n"
+			 "                         time between status packets sent to server (in seconds)\n"));
+	printf(_("  -U, --username=NAME    connect as specified database user\n"));
+	printf(_("  -w, --no-password      never prompt for password\n"));
+	printf(_("  -W, --password         force password prompt (should happen automatically)\n"));
 	printf(_("\nReport bugs to <pgsql-bugs@postgresql.org>.\n"));
 }
 
+
+/*
+ * Called in the background process every time data is received.
+ * On Unix, we check to see if there is any data on our pipe
+ * (which would mean we have a stop position), and if it is, check if
+ * it is time to stop.
+ * On Windows, we are in a single process, so we can just check if it's
+ * time to stop.
+ */
+static bool
+reached_end_position(XLogRecPtr segendpos, uint32 timeline,
+					 bool segment_finished)
+{
+	if (!has_xlogendptr)
+	{
+#ifndef WIN32
+		fd_set		fds;
+		struct timeval tv;
+		int			r;
+
+		/*
+		 * Don't have the end pointer yet - check our pipe to see if it has
+		 * been sent yet.
+		 */
+		FD_ZERO(&fds);
+		FD_SET(bgpipe[0], &fds);
+
+		MemSet(&tv, 0, sizeof(tv));
+
+		r = select(bgpipe[0] + 1, &fds, NULL, NULL, &tv);
+		if (r == 1)
+		{
+			char		xlogend[64];
+
+			MemSet(xlogend, 0, sizeof(xlogend));
+			r = read(bgpipe[0], xlogend, sizeof(xlogend));
+			if (r < 0)
+			{
+				fprintf(stderr, _("%s: could not read from ready pipe: %s\n"),
+						progname, strerror(errno));
+				exit(1);
+			}
+
+			if (sscanf(xlogend, "%X/%X", &xlogendptr.xlogid, &xlogendptr.xrecoff) != 2)
+			{
+				fprintf(stderr,
+				  _("%s: could not parse transaction log location \"%s\"\n"),
+						progname, xlogend);
+				exit(1);
+			}
+			has_xlogendptr = 1;
+
+			/*
+			 * Fall through to check if we've reached the point further
+			 * already.
+			 */
+		}
+		else
+		{
+			/*
+			 * No data received on the pipe means we don't know the end
+			 * position yet - so just say it's not time to stop yet.
+			 */
+			return false;
+		}
+#else
+
+		/*
+		 * On win32, has_xlogendptr is set by the main thread, so if it's not
+		 * set here, we just go back and wait until it shows up.
+		 */
+		return false;
+#endif
+	}
+
+	/*
+	 * At this point we have an end pointer, so compare it to the current
+	 * position to figure out if it's time to stop.
+	 */
+	if (segendpos.xlogid > xlogendptr.xlogid ||
+		(segendpos.xlogid == xlogendptr.xlogid &&
+		 segendpos.xrecoff >= xlogendptr.xrecoff))
+		return true;
+
+	/*
+	 * Have end pointer, but haven't reached it yet - so tell the caller to
+	 * keep streaming.
+	 */
+	return false;
+}
+
+typedef struct
+{
+	PGconn	   *bgconn;
+	XLogRecPtr	startptr;
+	char		xlogdir[MAXPGPATH];
+	char	   *sysidentifier;
+	int			timeline;
+} logstreamer_param;
+
+static int
+LogStreamerMain(logstreamer_param *param)
+{
+	if (!ReceiveXlogStream(param->bgconn, param->startptr, param->timeline,
+						   param->sysidentifier, param->xlogdir,
+						   reached_end_position, standby_message_timeout,
+						   true))
+
+		/*
+		 * Any errors will already have been reported in the function process,
+		 * but we need to tell the parent that we didn't shutdown in a nice
+		 * way.
+		 */
+		return 1;
+
+	PQfinish(param->bgconn);
+	return 0;
+}
+
+/*
+ * Initiate background process for receiving xlog during the backup.
+ * The background stream will use its own database connection so we can
+ * stream the logfile in parallel with the backups.
+ */
+static void
+StartLogStreamer(char *startpos, uint32 timeline, char *sysidentifier)
+{
+	logstreamer_param *param;
+
+	param = xmalloc0(sizeof(logstreamer_param));
+	param->timeline = timeline;
+	param->sysidentifier = sysidentifier;
+
+	/* Convert the starting position */
+	if (sscanf(startpos, "%X/%X", &param->startptr.xlogid, &param->startptr.xrecoff) != 2)
+	{
+		fprintf(stderr,
+				_("%s: could not parse transaction log location \"%s\"\n"),
+				progname, startpos);
+		disconnect_and_exit(1);
+	}
+	/* Round off to even segment position */
+	param->startptr.xrecoff -= param->startptr.xrecoff % XLOG_SEG_SIZE;
+
+#ifndef WIN32
+	/* Create our background pipe */
+	if (pipe(bgpipe) < 0)
+	{
+		fprintf(stderr,
+				_("%s: could not create pipe for background process: %s\n"),
+				progname, strerror(errno));
+		disconnect_and_exit(1);
+	}
+#endif
+
+	/* Get a second connection */
+	param->bgconn = GetConnection();
+	if (!param->bgconn)
+		/* Error message already written in GetConnection() */
+		exit(1);
+
+	/*
+	 * Always in plain format, so we can write to basedir/pg_xlog. But the
+	 * directory entry in the tar file may arrive later, so make sure it's
+	 * created before we start.
+	 */
+	snprintf(param->xlogdir, sizeof(param->xlogdir), "%s/pg_xlog", basedir);
+	verify_dir_is_empty_or_create(param->xlogdir);
+
+	/*
+	 * Start a child process and tell it to start streaming. On Unix, this is
+	 * a fork(). On Windows, we create a thread.
+	 */
+#ifndef WIN32
+	bgchild = fork();
+	if (bgchild == 0)
+	{
+		/* in child process */
+		exit(LogStreamerMain(param));
+	}
+	else if (bgchild < 0)
+	{
+		fprintf(stderr, _("%s: could not create background process: %s\n"),
+				progname, strerror(errno));
+		disconnect_and_exit(1);
+	}
+
+	/*
+	 * Else we are in the parent process and all is well.
+	 */
+#else							/* WIN32 */
+	bgchild = _beginthreadex(NULL, 0, (void *) LogStreamerMain, param, 0, NULL);
+	if (bgchild == 0)
+	{
+		fprintf(stderr, _("%s: could not create background thread: %s\n"),
+				progname, strerror(errno));
+		disconnect_and_exit(1);
+	}
+#endif
+}
 
 /*
  * Verify that the given directory exists and is empty. If it does not
@@ -208,11 +394,10 @@ progress_report(int tablespacenum, const char *filename)
 	char		totalsize_str[32];
 
 	/*
-	 * Avoid overflowing past 100% or the full size. This may make the
-	 * total size number change as we approach the end of the backup
-	 * (the estimate will always be wrong if WAL is included), but
-	 * that's better than having the done column be bigger than the
-	 * total.
+	 * Avoid overflowing past 100% or the full size. This may make the total
+	 * size number change as we approach the end of the backup (the estimate
+	 * will always be wrong if WAL is included), but that's better than having
+	 * the done column be bigger than the total.
 	 */
 	if (percent > 100)
 		percent = 100;
@@ -220,11 +405,12 @@ progress_report(int tablespacenum, const char *filename)
 		totalsize = totaldone / 1024;
 
 	/*
-	 * Separate step to keep platform-dependent format code out of translatable
-	 * strings.  And we only test for INT64_FORMAT availability in snprintf,
-	 * not fprintf.
+	 * Separate step to keep platform-dependent format code out of
+	 * translatable strings.  And we only test for INT64_FORMAT availability
+	 * in snprintf, not fprintf.
 	 */
-	snprintf(totaldone_str, sizeof(totaldone_str), INT64_FORMAT, totaldone / 1024);
+	snprintf(totaldone_str, sizeof(totaldone_str), INT64_FORMAT,
+			 totaldone / 1024);
 	snprintf(totalsize_str, sizeof(totalsize_str), INT64_FORMAT, totalsize);
 
 	if (verbose)
@@ -239,20 +425,23 @@ progress_report(int tablespacenum, const char *filename)
 					ngettext("%s/%s kB (100%%), %d/%d tablespace %35s",
 							 "%s/%s kB (100%%), %d/%d tablespaces %35s",
 							 tablespacecount),
-					totaldone_str, totalsize_str, tablespacenum, tablespacecount, "");
+					totaldone_str, totalsize_str,
+					tablespacenum, tablespacecount, "");
 		else
 			fprintf(stderr,
 					ngettext("%s/%s kB (%d%%), %d/%d tablespace (%-30.30s)",
 							 "%s/%s kB (%d%%), %d/%d tablespaces (%-30.30s)",
 							 tablespacecount),
-					totaldone_str, totalsize_str, percent, tablespacenum, tablespacecount, filename);
+					totaldone_str, totalsize_str, percent,
+					tablespacenum, tablespacecount, filename);
 	}
 	else
 		fprintf(stderr,
 				ngettext("%s/%s kB (%d%%), %d/%d tablespace",
 						 "%s/%s kB (%d%%), %d/%d tablespaces",
 						 tablespacecount),
-				totaldone_str, totalsize_str, percent, tablespacenum, tablespacecount);
+				totaldone_str, totalsize_str, percent,
+				tablespacenum, tablespacecount);
 
 	fprintf(stderr, "\r");
 }
@@ -276,11 +465,11 @@ ReceiveTarFile(PGconn *conn, PGresult *res, int rownum)
 	FILE	   *tarfile = NULL;
 
 #ifdef HAVE_LIBZ
-	gzFile	   *ztarfile = NULL;
+	gzFile		ztarfile = NULL;
 #endif
 
 	if (PQgetisnull(res, rownum, 0))
-
+	{
 		/*
 		 * Base tablespaces
 		 */
@@ -290,9 +479,11 @@ ReceiveTarFile(PGconn *conn, PGresult *res, int rownum)
 			if (compresslevel != 0)
 			{
 				ztarfile = gzdopen(dup(fileno(stdout)), "wb");
-				if (gzsetparams(ztarfile, compresslevel, Z_DEFAULT_STRATEGY) != Z_OK)
+				if (gzsetparams(ztarfile, compresslevel,
+								Z_DEFAULT_STRATEGY) != Z_OK)
 				{
-					fprintf(stderr, _("%s: could not set compression level %i: %s\n"),
+					fprintf(stderr,
+							_("%s: could not set compression level %d: %s\n"),
 							progname, compresslevel, get_gz_error(ztarfile));
 					disconnect_and_exit(1);
 				}
@@ -308,9 +499,11 @@ ReceiveTarFile(PGconn *conn, PGresult *res, int rownum)
 			{
 				snprintf(filename, sizeof(filename), "%s/base.tar.gz", basedir);
 				ztarfile = gzopen(filename, "wb");
-				if (gzsetparams(ztarfile, compresslevel, Z_DEFAULT_STRATEGY) != Z_OK)
+				if (gzsetparams(ztarfile, compresslevel,
+								Z_DEFAULT_STRATEGY) != Z_OK)
 				{
-					fprintf(stderr, _("%s: could not set compression level %i: %s\n"),
+					fprintf(stderr,
+							_("%s: could not set compression level %d: %s\n"),
 							progname, compresslevel, get_gz_error(ztarfile));
 					disconnect_and_exit(1);
 				}
@@ -322,6 +515,7 @@ ReceiveTarFile(PGconn *conn, PGresult *res, int rownum)
 				tarfile = fopen(filename, "wb");
 			}
 		}
+	}
 	else
 	{
 		/*
@@ -330,11 +524,14 @@ ReceiveTarFile(PGconn *conn, PGresult *res, int rownum)
 #ifdef HAVE_LIBZ
 		if (compresslevel != 0)
 		{
-			snprintf(filename, sizeof(filename), "%s/%s.tar.gz", basedir, PQgetvalue(res, rownum, 0));
+			snprintf(filename, sizeof(filename), "%s/%s.tar.gz", basedir,
+					 PQgetvalue(res, rownum, 0));
 			ztarfile = gzopen(filename, "wb");
-			if (gzsetparams(ztarfile, compresslevel, Z_DEFAULT_STRATEGY) != Z_OK)
+			if (gzsetparams(ztarfile, compresslevel,
+							Z_DEFAULT_STRATEGY) != Z_OK)
 			{
-				fprintf(stderr, _("%s: could not set compression level %i: %s\n"),
+				fprintf(stderr,
+						_("%s: could not set compression level %d: %s\n"),
 						progname, compresslevel, get_gz_error(ztarfile));
 				disconnect_and_exit(1);
 			}
@@ -342,7 +539,8 @@ ReceiveTarFile(PGconn *conn, PGresult *res, int rownum)
 		else
 #endif
 		{
-			snprintf(filename, sizeof(filename), "%s/%s.tar", basedir, PQgetvalue(res, rownum, 0));
+			snprintf(filename, sizeof(filename), "%s/%s.tar", basedir,
+					 PQgetvalue(res, rownum, 0));
 			tarfile = fopen(filename, "wb");
 		}
 	}
@@ -353,7 +551,8 @@ ReceiveTarFile(PGconn *conn, PGresult *res, int rownum)
 		if (!ztarfile)
 		{
 			/* Compression is in use */
-			fprintf(stderr, _("%s: could not create compressed file \"%s\": %s\n"),
+			fprintf(stderr,
+					_("%s: could not create compressed file \"%s\": %s\n"),
 					progname, filename, get_gz_error(ztarfile));
 			disconnect_and_exit(1);
 		}
@@ -406,10 +605,13 @@ ReceiveTarFile(PGconn *conn, PGresult *res, int rownum)
 #ifdef HAVE_LIBZ
 			if (ztarfile != NULL)
 			{
-				if (gzwrite(ztarfile, zerobuf, sizeof(zerobuf)) != sizeof(zerobuf))
+				if (gzwrite(ztarfile, zerobuf, sizeof(zerobuf)) !=
+					sizeof(zerobuf))
 				{
-					fprintf(stderr, _("%s: could not write to compressed file \"%s\": %s\n"),
+					fprintf(stderr,
+					_("%s: could not write to compressed file \"%s\": %s\n"),
 							progname, filename, get_gz_error(ztarfile));
+					disconnect_and_exit(1);
 				}
 			}
 			else
@@ -417,27 +619,37 @@ ReceiveTarFile(PGconn *conn, PGresult *res, int rownum)
 			{
 				if (fwrite(zerobuf, sizeof(zerobuf), 1, tarfile) != 1)
 				{
-					fprintf(stderr, _("%s: could not write to file \"%s\": %s\n"),
+					fprintf(stderr,
+							_("%s: could not write to file \"%s\": %s\n"),
 							progname, filename, strerror(errno));
 					disconnect_and_exit(1);
 				}
 			}
 
-			if (strcmp(basedir, "-") == 0)
-			{
 #ifdef HAVE_LIBZ
-				if (ztarfile)
-					gzclose(ztarfile);
-#endif
+			if (ztarfile != NULL)
+			{
+				if (gzclose(ztarfile) != 0)
+				{
+					fprintf(stderr,
+					   _("%s: could not close compressed file \"%s\": %s\n"),
+							progname, filename, get_gz_error(ztarfile));
+					disconnect_and_exit(1);
+				}
 			}
 			else
-			{
-#ifdef HAVE_LIBZ
-				if (ztarfile != NULL)
-					gzclose(ztarfile);
 #endif
-				if (tarfile != NULL)
-					fclose(tarfile);
+			{
+				if (strcmp(basedir, "-") != 0)
+				{
+					if (fclose(tarfile) != 0)
+					{
+						fprintf(stderr,
+								_("%s: could not close file \"%s\": %s\n"),
+								progname, filename, strerror(errno));
+						disconnect_and_exit(1);
+					}
+				}
 			}
 
 			break;
@@ -454,8 +666,10 @@ ReceiveTarFile(PGconn *conn, PGresult *res, int rownum)
 		{
 			if (gzwrite(ztarfile, copybuf, r) != r)
 			{
-				fprintf(stderr, _("%s: could not write to compressed file \"%s\": %s\n"),
+				fprintf(stderr,
+					_("%s: could not write to compressed file \"%s\": %s\n"),
 						progname, filename, get_gz_error(ztarfile));
+				disconnect_and_exit(1);
 			}
 		}
 		else
@@ -501,11 +715,6 @@ ReceiveAndUnpackTarFile(PGconn *conn, PGresult *res, int rownum)
 		strcpy(current_path, basedir);
 	else
 		strcpy(current_path, PQgetvalue(res, rownum, 1));
-
-	/*
-	 * Make sure we're unpacking into an empty directory
-	 */
-	verify_dir_is_empty_or_create(current_path);
 
 	/*
 	 * Get the COPY data
@@ -556,7 +765,7 @@ ReceiveAndUnpackTarFile(PGconn *conn, PGresult *res, int rownum)
 			 */
 			if (r != 512)
 			{
-				fprintf(stderr, _("%s: invalid tar block header size: %i\n"),
+				fprintf(stderr, _("%s: invalid tar block header size: %d\n"),
 						progname, r);
 				disconnect_and_exit(1);
 			}
@@ -586,7 +795,8 @@ ReceiveAndUnpackTarFile(PGconn *conn, PGresult *res, int rownum)
 			/*
 			 * First part of header is zero terminated filename
 			 */
-			snprintf(filename, sizeof(filename), "%s/%s", current_path, copybuf);
+			snprintf(filename, sizeof(filename), "%s/%s", current_path,
+					 copybuf);
 			if (filename[strlen(filename) - 1] == '/')
 			{
 				/*
@@ -597,17 +807,26 @@ ReceiveAndUnpackTarFile(PGconn *conn, PGresult *res, int rownum)
 					/*
 					 * Directory
 					 */
-					filename[strlen(filename) - 1] = '\0';	/* Remove trailing slash */
+					filename[strlen(filename) - 1] = '\0';		/* Remove trailing slash */
 					if (mkdir(filename, S_IRWXU) != 0)
 					{
-						fprintf(stderr,
+						/*
+						 * When streaming WAL, pg_xlog will have been created
+						 * by the wal receiver process, so just ignore failure
+						 * on that.
+						 */
+						if (!streamwal || strcmp(filename + strlen(filename) - 8, "/pg_xlog") != 0)
+						{
+							fprintf(stderr,
 							_("%s: could not create directory \"%s\": %s\n"),
-								progname, filename, strerror(errno));
-						disconnect_and_exit(1);
+									progname, filename, strerror(errno));
+							disconnect_and_exit(1);
+						}
 					}
 #ifndef WIN32
 					if (chmod(filename, (mode_t) filemode))
-						fprintf(stderr, _("%s: could not set permissions on directory \"%s\": %s\n"),
+						fprintf(stderr,
+								_("%s: could not set permissions on directory \"%s\": %s\n"),
 								progname, filename, strerror(errno));
 #endif
 				}
@@ -616,18 +835,19 @@ ReceiveAndUnpackTarFile(PGconn *conn, PGresult *res, int rownum)
 					/*
 					 * Symbolic link
 					 */
-					filename[strlen(filename) - 1] = '\0';	/* Remove trailing slash */
+					filename[strlen(filename) - 1] = '\0';		/* Remove trailing slash */
 					if (symlink(&copybuf[157], filename) != 0)
 					{
 						fprintf(stderr,
 								_("%s: could not create symbolic link from \"%s\" to \"%s\": %s\n"),
-								progname, filename, &copybuf[157], strerror(errno));
+						 progname, filename, &copybuf[157], strerror(errno));
 						disconnect_and_exit(1);
 					}
 				}
 				else
 				{
-					fprintf(stderr, _("%s: unrecognized link indicator \"%c\"\n"),
+					fprintf(stderr,
+							_("%s: unrecognized link indicator \"%c\"\n"),
 							progname, copybuf[156]);
 					disconnect_and_exit(1);
 				}
@@ -705,7 +925,9 @@ ReceiveAndUnpackTarFile(PGconn *conn, PGresult *res, int rownum)
 
 	if (file != NULL)
 	{
-		fprintf(stderr, _("%s: COPY stream ended before last file was finished\n"), progname);
+		fprintf(stderr,
+				_("%s: COPY stream ended before last file was finished\n"),
+				progname);
 		disconnect_and_exit(1);
 	}
 
@@ -714,94 +936,12 @@ ReceiveAndUnpackTarFile(PGconn *conn, PGresult *res, int rownum)
 }
 
 
-static PGconn *
-GetConnection(void)
-{
-	PGconn	   *tmpconn;
-	int			argcount = 4;	/* dbname, replication, fallback_app_name,
-								 * password */
-	int			i;
-	const char **keywords;
-	const char **values;
-	char	   *password = NULL;
-
-	if (dbhost)
-		argcount++;
-	if (dbuser)
-		argcount++;
-	if (dbport)
-		argcount++;
-
-	keywords = xmalloc0((argcount + 1) * sizeof(*keywords));
-	values = xmalloc0((argcount + 1) * sizeof(*values));
-
-	keywords[0] = "dbname";
-	values[0] = "replication";
-	keywords[1] = "replication";
-	values[1] = "true";
-	keywords[2] = "fallback_application_name";
-	values[2] = progname;
-	i = 3;
-	if (dbhost)
-	{
-		keywords[i] = "host";
-		values[i] = dbhost;
-		i++;
-	}
-	if (dbuser)
-	{
-		keywords[i] = "user";
-		values[i] = dbuser;
-		i++;
-	}
-	if (dbport)
-	{
-		keywords[i] = "port";
-		values[i] = dbport;
-		i++;
-	}
-
-	while (true)
-	{
-		if (dbgetpassword == 1)
-		{
-			/* Prompt for a password */
-			password = simple_prompt(_("Password: "), 100, false);
-			keywords[argcount - 1] = "password";
-			values[argcount - 1] = password;
-		}
-
-		tmpconn = PQconnectdbParams(keywords, values, true);
-		if (password)
-			free(password);
-
-		if (PQstatus(tmpconn) == CONNECTION_BAD &&
-			PQconnectionNeedsPassword(tmpconn) &&
-			dbgetpassword != -1)
-		{
-			dbgetpassword = 1;	/* ask for password next time */
-			PQfinish(tmpconn);
-			continue;
-		}
-
-		if (PQstatus(tmpconn) != CONNECTION_OK)
-		{
-			fprintf(stderr, _("%s: could not connect to server: %s"),
-					progname, PQerrorMessage(tmpconn));
-			exit(1);
-		}
-
-		/* Connection ok! */
-		free(values);
-		free(keywords);
-		return tmpconn;
-	}
-}
-
 static void
 BaseBackup(void)
 {
 	PGresult   *res;
+	char	   *sysidentifier;
+	uint32		timeline;
 	char		current_path[MAXPGPATH];
 	char		escaped_label[MAXPGPATH];
 	int			i;
@@ -812,22 +952,47 @@ BaseBackup(void)
 	 * Connect in replication mode to the server
 	 */
 	conn = GetConnection();
+	if (!conn)
+		/* Error message already written in GetConnection() */
+		exit(1);
+
+	/*
+	 * Run IDENTIFY_SYSTEM so we can get the timeline
+	 */
+	res = PQexec(conn, "IDENTIFY_SYSTEM");
+	if (PQresultStatus(res) != PGRES_TUPLES_OK)
+	{
+		fprintf(stderr, _("%s: could not send replication command \"%s\": %s"),
+				progname, "IDENTIFY_SYSTEM", PQerrorMessage(conn));
+		disconnect_and_exit(1);
+	}
+	if (PQntuples(res) != 1 || PQnfields(res) != 3)
+	{
+		fprintf(stderr,
+				_("%s: could not identify system: got %d rows and %d fields, expected %d rows and %d fields\n"),
+				progname, PQntuples(res), PQnfields(res), 1, 3);
+		disconnect_and_exit(1);
+	}
+	sysidentifier = strdup(PQgetvalue(res, 0, 0));
+	timeline = atoi(PQgetvalue(res, 0, 1));
+	PQclear(res);
 
 	/*
 	 * Start the actual backup
 	 */
 	PQescapeStringConn(conn, escaped_label, label, sizeof(escaped_label), &i);
-	snprintf(current_path, sizeof(current_path), "BASE_BACKUP LABEL '%s' %s %s %s %s",
+	snprintf(current_path, sizeof(current_path),
+			 "BASE_BACKUP LABEL '%s' %s %s %s %s",
 			 escaped_label,
 			 showprogress ? "PROGRESS" : "",
-			 includewal ? "WAL" : "",
+			 includewal && !streamwal ? "WAL" : "",
 			 fastcheckpoint ? "FAST" : "",
 			 includewal ? "NOWAIT" : "");
 
 	if (PQsendQuery(conn, current_path) == 0)
 	{
-		fprintf(stderr, _("%s: could not send base backup command: %s"),
-				progname, PQerrorMessage(conn));
+		fprintf(stderr, _("%s: could not send replication command \"%s\": %s"),
+				progname, "BASE_BACKUP", PQerrorMessage(conn));
 		disconnect_and_exit(1);
 	}
 
@@ -849,7 +1014,7 @@ BaseBackup(void)
 	}
 	strcpy(xlogstart, PQgetvalue(res, 0, 0));
 	if (verbose && includewal)
-		fprintf(stderr, "xlog start point: %s\n", xlogstart);
+		fprintf(stderr, "transaction log start point: %s\n", xlogstart);
 	PQclear(res);
 	MemSet(xlogend, 0, sizeof(xlogend));
 
@@ -893,9 +1058,22 @@ BaseBackup(void)
 	 */
 	if (format == 't' && strcmp(basedir, "-") == 0 && PQntuples(res) > 1)
 	{
-		fprintf(stderr, _("%s: can only write single tablespace to stdout, database has %i\n"),
+		fprintf(stderr,
+				_("%s: can only write single tablespace to stdout, database has %d\n"),
 				progname, PQntuples(res));
 		disconnect_and_exit(1);
+	}
+
+	/*
+	 * If we're streaming WAL, start the streaming session before we start
+	 * receiving the actual data chunks.
+	 */
+	if (streamwal)
+	{
+		if (verbose)
+			fprintf(stderr, _("%s: starting background WAL receiver\n"),
+					progname);
+		StartLogStreamer(xlogstart, timeline, sysidentifier);
 	}
 
 	/*
@@ -922,19 +1100,21 @@ BaseBackup(void)
 	res = PQgetResult(conn);
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
 	{
-		fprintf(stderr, _("%s: could not get WAL end position from server\n"),
-				progname);
+		fprintf(stderr,
+		 _("%s: could not get transaction log end position from server: %s"),
+				progname, PQerrorMessage(conn));
 		disconnect_and_exit(1);
 	}
 	if (PQntuples(res) != 1)
 	{
-		fprintf(stderr, _("%s: no WAL end position returned from server\n"),
+		fprintf(stderr,
+			 _("%s: no transaction log end position returned from server\n"),
 				progname);
 		disconnect_and_exit(1);
 	}
 	strcpy(xlogend, PQgetvalue(res, 0, 0));
 	if (verbose && includewal)
-		fprintf(stderr, "xlog end point: %s\n", xlogend);
+		fprintf(stderr, "transaction log end point: %s\n", xlogend);
 	PQclear(res);
 
 	res = PQgetResult(conn);
@@ -945,9 +1125,101 @@ BaseBackup(void)
 		disconnect_and_exit(1);
 	}
 
+	if (bgchild > 0)
+	{
+#ifndef WIN32
+		int			status;
+		int			r;
+#else
+		DWORD		status;
+#endif
+
+		if (verbose)
+			fprintf(stderr,
+					_("%s: waiting for background process to finish streaming...\n"), progname);
+
+#ifndef WIN32
+		if (write(bgpipe[1], xlogend, strlen(xlogend)) != strlen(xlogend))
+		{
+			fprintf(stderr,
+					_("%s: could not send command to background pipe: %s\n"),
+					progname, strerror(errno));
+			disconnect_and_exit(1);
+		}
+
+		/* Just wait for the background process to exit */
+		r = waitpid(bgchild, &status, 0);
+		if (r == -1)
+		{
+			fprintf(stderr, _("%s: could not wait for child process: %s\n"),
+					progname, strerror(errno));
+			disconnect_and_exit(1);
+		}
+		if (r != bgchild)
+		{
+			fprintf(stderr, _("%s: child %d died, expected %d\n"),
+					progname, r, (int) bgchild);
+			disconnect_and_exit(1);
+		}
+		if (!WIFEXITED(status))
+		{
+			fprintf(stderr, _("%s: child process did not exit normally\n"),
+					progname);
+			disconnect_and_exit(1);
+		}
+		if (WEXITSTATUS(status) != 0)
+		{
+			fprintf(stderr, _("%s: child process exited with error %d\n"),
+					progname, WEXITSTATUS(status));
+			disconnect_and_exit(1);
+		}
+		/* Exited normally, we're happy! */
+#else							/* WIN32 */
+
+		/*
+		 * On Windows, since we are in the same process, we can just store the
+		 * value directly in the variable, and then set the flag that says
+		 * it's there.
+		 */
+		if (sscanf(xlogend, "%X/%X", &xlogendptr.xlogid, &xlogendptr.xrecoff) != 2)
+		{
+			fprintf(stderr,
+				  _("%s: could not parse transaction log location \"%s\"\n"),
+					progname, xlogend);
+			disconnect_and_exit(1);
+		}
+		InterlockedIncrement(&has_xlogendptr);
+
+		/* First wait for the thread to exit */
+		if (WaitForSingleObjectEx((HANDLE) bgchild, INFINITE, FALSE) !=
+			WAIT_OBJECT_0)
+		{
+			_dosmaperr(GetLastError());
+			fprintf(stderr, _("%s: could not wait for child thread: %s\n"),
+					progname, strerror(errno));
+			disconnect_and_exit(1);
+		}
+		if (GetExitCodeThread((HANDLE) bgchild, &status) == 0)
+		{
+			_dosmaperr(GetLastError());
+			fprintf(stderr, _("%s: could not get child thread exit status: %s\n"),
+					progname, strerror(errno));
+			disconnect_and_exit(1);
+		}
+		if (status != 0)
+		{
+			fprintf(stderr, _("%s: child thread exited with error %u\n"),
+					progname, (unsigned int) status);
+			disconnect_and_exit(1);
+		}
+		/* Exited normally, we're happy */
+#endif
+	}
+
 	/*
 	 * End of copy data. Final result is already checked inside the loop.
 	 */
+	PQclear(res);
 	PQfinish(conn);
 
 	if (verbose)
@@ -965,6 +1237,7 @@ main(int argc, char **argv)
 		{"format", required_argument, NULL, 'F'},
 		{"checkpoint", required_argument, NULL, 'c'},
 		{"xlog", no_argument, NULL, 'x'},
+		{"xlog-method", required_argument, NULL, 'X'},
 		{"gzip", no_argument, NULL, 'z'},
 		{"compress", required_argument, NULL, 'Z'},
 		{"label", required_argument, NULL, 'l'},
@@ -973,6 +1246,7 @@ main(int argc, char **argv)
 		{"username", required_argument, NULL, 'U'},
 		{"no-password", no_argument, NULL, 'w'},
 		{"password", no_argument, NULL, 'W'},
+		{"status-interval", required_argument, NULL, 's'},
 		{"verbose", no_argument, NULL, 'v'},
 		{"progress", no_argument, NULL, 'P'},
 		{NULL, 0, NULL, 0}
@@ -999,7 +1273,7 @@ main(int argc, char **argv)
 		}
 	}
 
-	while ((c = getopt_long(argc, argv, "D:F:xl:zZ:c:h:p:U:wWvP",
+	while ((c = getopt_long(argc, argv, "D:F:xX:l:zZ:c:h:p:U:s:wWvP",
 							long_options, &option_index)) != -1)
 	{
 		switch (c)
@@ -1014,13 +1288,47 @@ main(int argc, char **argv)
 					format = 't';
 				else
 				{
-					fprintf(stderr, _("%s: invalid output format \"%s\", must be \"plain\" or \"tar\"\n"),
+					fprintf(stderr,
+							_("%s: invalid output format \"%s\", must be \"plain\" or \"tar\"\n"),
 							progname, optarg);
 					exit(1);
 				}
 				break;
 			case 'x':
+				if (includewal)
+				{
+					fprintf(stderr,
+					 _("%s: cannot specify both --xlog and --xlog-method\n"),
+							progname);
+					exit(1);
+				}
+
 				includewal = true;
+				streamwal = false;
+				break;
+			case 'X':
+				if (includewal)
+				{
+					fprintf(stderr,
+					 _("%s: cannot specify both --xlog and --xlog-method\n"),
+							progname);
+					exit(1);
+				}
+
+				includewal = true;
+				if (strcmp(optarg, "f") == 0 ||
+					strcmp(optarg, "fetch") == 0)
+					streamwal = false;
+				else if (strcmp(optarg, "s") == 0 ||
+						 strcmp(optarg, "stream") == 0)
+					streamwal = true;
+				else
+				{
+					fprintf(stderr,
+							_("%s: invalid xlog-method option \"%s\", must be \"fetch\" or \"stream\"\n"),
+							progname, optarg);
+					exit(1);
+				}
 				break;
 			case 'l':
 				label = xstrdup(optarg);
@@ -1067,6 +1375,15 @@ main(int argc, char **argv)
 				break;
 			case 'W':
 				dbgetpassword = 1;
+				break;
+			case 's':
+				standby_message_timeout = atoi(optarg) * 1000;
+				if (standby_message_timeout < 0)
+				{
+					fprintf(stderr, _("%s: invalid status interval \"%s\"\n"),
+							progname, optarg);
+					exit(1);
+				}
 				break;
 			case 'v':
 				verbose++;
@@ -1122,6 +1439,16 @@ main(int argc, char **argv)
 		exit(1);
 	}
 
+	if (format != 'p' && streamwal)
+	{
+		fprintf(stderr,
+				_("%s: wal streaming can only be used in plain mode\n"),
+				progname);
+		fprintf(stderr, _("Try \"%s --help\" for more information.\n"),
+				progname);
+		exit(1);
+	}
+
 #ifndef HAVE_LIBZ
 	if (compresslevel != 0)
 	{
@@ -1139,7 +1466,6 @@ main(int argc, char **argv)
 	 */
 	if (format == 'p' || strcmp(basedir, "-") != 0)
 		verify_dir_is_empty_or_create(basedir);
-
 
 	BaseBackup();
 

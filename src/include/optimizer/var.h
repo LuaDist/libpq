@@ -4,7 +4,7 @@
  *	  prototypes for optimizer/util/var.c.
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/optimizer/var.h
@@ -31,7 +31,7 @@ typedef enum
 } PVCPlaceHolderBehavior;
 
 extern Relids pull_varnos(Node *node);
-extern void pull_varattnos(Node *node, Bitmapset **varattnos);
+extern void pull_varattnos(Node *node, Index varno, Bitmapset **varattnos);
 extern bool contain_var_clause(Node *node);
 extern bool contain_vars_of_level(Node *node, int levelsup);
 extern int	locate_var_of_level(Node *node, int levelsup);

@@ -1,11 +1,9 @@
 /*
  *	pg_upgrade.h
  *
- *	Copyright (c) 2010-2011, PostgreSQL Global Development Group
+ *	Copyright (c) 2010-2012, PostgreSQL Global Development Group
  *	contrib/pg_upgrade/pg_upgrade.h
  */
-
-#include "postgres.h"
 
 #include <unistd.h>
 #include <assert.h>
@@ -14,6 +12,9 @@
 #include <sys/time.h>
 
 #include "libpq-fe.h"
+
+/* Use port in the private/dynamic port number range */
+#define DEF_PGUPORT			50432
 
 /* Allocate for null byte */
 #define USER_NAME_SIZE		128
@@ -34,22 +35,65 @@
 #define GLOBALS_DUMP_FILE	"pg_upgrade_dump_globals.sql"
 #define DB_DUMP_FILE		"pg_upgrade_dump_db.sql"
 
+#define SERVER_LOG_FILE		"pg_upgrade_server.log"
+#define RESTORE_LOG_FILE	"pg_upgrade_restore.log"
+#define UTILITY_LOG_FILE	"pg_upgrade_utility.log"
+#define INTERNAL_LOG_FILE	"pg_upgrade_internal.log"
+
+extern char *output_files[];
+
+/*
+ * WIN32 files do not accept writes from multiple processes
+ *
+ * On Win32, we can't send both pg_upgrade output and command output to the
+ * same file because we get the error: "The process cannot access the file
+ * because it is being used by another process." so send the pg_ctl
+ * command-line output to a new file, rather than into the server log file.
+ * Ideally we could use UTILITY_LOG_FILE for this, but some Windows platforms
+ * keep the pg_ctl output file open by the running postmaster, even after
+ * pg_ctl exits.
+ *
+ * We could use the Windows pgwin32_open() flags to allow shared file
+ * writes but is unclear how all other tools would use those flags, so
+ * we just avoid it and log a little differently on Windows;  we adjust
+ * the error message appropriately.
+ */
+#ifndef WIN32
+#define SERVER_START_LOG_FILE	SERVER_LOG_FILE
+#define SERVER_STOP_LOG_FILE	SERVER_LOG_FILE
+#else
+#define SERVER_START_LOG_FILE	"pg_upgrade_server_start.log"
+/*
+ *	"pg_ctl start" keeps SERVER_START_LOG_FILE and SERVER_LOG_FILE open
+ *	while the server is running, so we use UTILITY_LOG_FILE for "pg_ctl
+ *	stop".
+ */
+#define SERVER_STOP_LOG_FILE	UTILITY_LOG_FILE
+#endif
+
+
 #ifndef WIN32
 #define pg_copy_file		copy_file
 #define pg_mv_file			rename
 #define pg_link_file		link
+#define PATH_SEPARATOR      '/'
 #define RM_CMD				"rm -f"
 #define RMDIR_CMD			"rm -rf"
 #define SCRIPT_EXT			"sh"
+#define ECHO_QUOTE	"'"
+#define ECHO_BLANK  ""
 #else
 #define pg_copy_file		CopyFile
 #define pg_mv_file			pgrename
 #define pg_link_file		win32_pghardlink
 #define sleep(x)			Sleep(x * 1000)
+#define PATH_SEPARATOR      '\\'
 #define RM_CMD				"DEL /q"
 #define RMDIR_CMD			"RMDIR /s/q"
 #define SCRIPT_EXT			"bat"
 #define EXE_EXT				".exe"
+#define ECHO_QUOTE	""
+#define ECHO_BLANK  "."
 #endif
 
 #define CLUSTER_NAME(cluster)	((cluster) == &old_cluster ? "old" : \
@@ -61,6 +105,12 @@
 #define TABLE_SPACE_SUBDIRS_CAT_VER 201001111
 /* postmaster/postgres -b (binary_upgrade) flag added during PG 9.1 development */
 #define BINARY_UPGRADE_SERVER_FLAG_CAT_VER 201104251
+/*
+ *	Visibility map changed with this 9.2 commit,
+ *	8f9fe6edce358f7904e0db119416b4d1080a83aa; pick later catalog version.
+ */
+#define VISIBILITY_MAP_CRASHSAFE_CAT_VER 201107031
+
 
 /*
  * Each relation is represented by a relinfo structure.
@@ -71,7 +121,8 @@ typedef struct
 	char		relname[NAMEDATALEN];	/* relation name */
 	Oid			reloid;			/* relation oid */
 	Oid			relfilenode;	/* relation relfile node */
-	char		tablespace[MAXPGPATH];	/* relations tablespace path */
+	/* relation tablespace path, or "" for the cluster default */
+	char		tablespace[MAXPGPATH];
 } RelInfo;
 
 typedef struct
@@ -159,11 +210,10 @@ typedef enum
  */
 typedef enum
 {
-	PG_INFO,
+	PG_VERBOSE,
 	PG_REPORT,
 	PG_WARNING,
-	PG_FATAL,
-	PG_DEBUG
+	PG_FATAL
 } eLogType;
 
 
@@ -180,12 +230,19 @@ typedef struct
 	ControlData controldata;	/* pg_control information */
 	DbInfoArr	dbarr;			/* dbinfos array */
 	char	   *pgdata;			/* pathname for cluster's $PGDATA directory */
+	char	   *pgconfig;		/* pathname for cluster's config file
+								 * directory */
 	char	   *bindir;			/* pathname for cluster's executable directory */
+	char	   *pgopts;			/* options to pass to the server, like pg_ctl
+								 * -o */
+	char	   *sockdir;		/* directory for Unix Domain socket, if any */
 	unsigned short port;		/* port number where postmaster is waiting */
 	uint32		major_version;	/* PG_VERSION of cluster */
 	char		major_version_str[64];	/* string PG_VERSION of cluster */
 	uint32		bin_version;	/* version returned from pg_ctl */
 	Oid			pg_database_oid;	/* OID of pg_database relation */
+	Oid			install_role_oid;	/* OID of connected role */
+	Oid			role_count;			/* number of roles defined in the cluster */
 	char	   *tablespace_suffix;		/* directory specification */
 } ClusterInfo;
 
@@ -195,11 +252,9 @@ typedef struct
 */
 typedef struct
 {
-	char	   *filename;		/* name of log file (may be /dev/null) */
-	FILE	   *fd;				/* log FILE */
-	bool		debug;			/* TRUE -> log more information */
-	FILE	   *debug_fd;		/* debug-level log FILE */
+	FILE	   *internal;		/* internal log FILE */
 	bool		verbose;		/* TRUE -> be verbose in messages */
+	bool		retain;			/* retain log files on success */
 } LogOpts;
 
 
@@ -222,7 +277,6 @@ typedef struct
 	const char *progname;		/* complete pathname for this program */
 	char	   *exec_path;		/* full path to my executable */
 	char	   *user;			/* username for clusters */
-	char		cwd[MAXPGPATH]; /* current working directory, used for output */
 	char	  **tablespaces;	/* tablespaces */
 	int			num_tablespaces;
 	char	  **libraries;		/* loadable libraries */
@@ -239,7 +293,6 @@ extern UserOpts user_opts;
 extern ClusterInfo old_cluster,
 			new_cluster;
 extern OSInfo os_info;
-extern char scandir_file_pattern[];
 
 
 /* check.c */
@@ -250,17 +303,19 @@ void check_old_cluster(bool live_check,
 void		check_new_cluster(void);
 void		report_clusters_compatible(void);
 void		issue_warnings(char *sequence_script_file_name);
-void		output_completion_banner(char *deletion_script_file_name);
+void output_completion_banner(char *analyze_script_file_name,
+						 char *deletion_script_file_name);
 void		check_cluster_versions(void);
 void		check_cluster_compatibility(bool live_check);
 void		create_script_for_old_cluster_deletion(char **deletion_script_file_name);
+void		create_script_for_cluster_analyze(char **analyze_script_file_name);
 
 
 /* controldata.c */
 
 void		get_control_data(ClusterInfo *cluster, bool live_check);
-void check_control_data(ControlData *oldctrl,
-				   ControlData *newctrl);
+void		check_control_data(ControlData *oldctrl, ControlData *newctrl);
+void		disable_old_cluster(void);
 
 
 /* dump.c */
@@ -271,11 +326,13 @@ void		split_old_dump(void);
 
 /* exec.c */
 
-int exec_prog(bool throw_error,
-		  const char *cmd,...);
+#define EXEC_PSQL_ARGS "--echo-queries --set ON_ERROR_STOP=on --no-psqlrc --dbname=template1"
+bool
+exec_prog(const char *log_file, const char *opt_log_file,
+		  bool throw_error, const char *fmt,...)
+__attribute__((format(PG_PRINTF_ATTRIBUTE, 4, 5)));
 void		verify_directories(void);
 bool		is_server_running(const char *datadir);
-void		rename_old_pg_control(void);
 
 
 /* file.c */
@@ -310,15 +367,14 @@ const char *setupPageConverter(pageCnvCtx **result);
 typedef void *pageCnvCtx;
 #endif
 
-int			dir_matching_filenames(const struct dirent * scan_ent);
-int pg_scandir(const char *dirname, struct dirent *** namelist,
-		   int (*selector) (const struct dirent *));
+int			load_directory(const char *dirname, char ***namelist);
 const char *copyAndUpdateFile(pageCnvCtx *pageConverter, const char *src,
 				  const char *dst, bool force);
 const char *linkAndUpdateFile(pageCnvCtx *pageConverter, const char *src,
 				  const char *dst);
 
 void		check_hard_link(void);
+FILE	   *fopen_priv(const char *path, const char *mode);
 
 /* function.c */
 
@@ -340,6 +396,8 @@ void print_maps(FileNameMap *maps, int n,
 /* option.c */
 
 void		parseCommandLine(int argc, char *argv[]);
+void		adjust_data_dir(ClusterInfo *cluster);
+void		get_sock_dir(ClusterInfo *cluster, bool live_check);
 
 /* relfilenode.c */
 
@@ -356,7 +414,11 @@ void		init_tablespaces(void);
 /* server.c */
 
 PGconn	   *connectToServer(ClusterInfo *cluster, const char *db_name);
-PGresult   *executeQueryOrDie(PGconn *conn, const char *fmt,...);
+PGresult *
+executeQueryOrDie(PGconn *conn, const char *fmt,...)
+__attribute__((format(PG_PRINTF_ATTRIBUTE, 2, 3)));
+
+char	   *cluster_conn_opts(ClusterInfo *cluster);
 
 void		start_postmaster(ClusterInfo *cluster);
 void		stop_postmaster(bool fast);
@@ -369,12 +431,19 @@ void		check_pghost_envvar(void);
 char	   *quote_identifier(const char *s);
 int			get_user_info(char **user_name);
 void		check_ok(void);
-void		report_status(eLogType type, const char *fmt,...);
-void		pg_log(eLogType type, char *fmt,...);
-void		prep_status(const char *fmt,...);
+void
+report_status(eLogType type, const char *fmt,...)
+__attribute__((format(PG_PRINTF_ATTRIBUTE, 2, 3)));
+void
+pg_log(eLogType type, char *fmt,...)
+__attribute__((format(PG_PRINTF_ATTRIBUTE, 2, 3)));
+void
+prep_status(const char *fmt,...)
+__attribute__((format(PG_PRINTF_ATTRIBUTE, 1, 2)));
 void		check_ok(void);
 char	   *pg_strdup(const char *s);
-void	   *pg_malloc(int size);
+void	   *pg_malloc(size_t size);
+void	   *pg_realloc(void *ptr, size_t size);
 void		pg_free(void *ptr);
 const char *getErrorText(int errNum);
 unsigned int str2uint(const char *str);

@@ -3,7 +3,7 @@
  * readfuncs.c
  *	  Reader functions for Postgres tree nodes.
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -48,7 +48,8 @@
 /* And a few guys need only the pg_strtok support fields */
 #define READ_TEMP_LOCALS()	\
 	char	   *token;		\
-	int			length
+	int			length;		\
+	(void) token				/* possibly unused */
 
 /* ... but most need both */
 #define READ_LOCALS(nodeTypeName)			\
@@ -194,10 +195,10 @@ _readQuery(void)
 
 	READ_ENUM_FIELD(commandType, CmdType);
 	READ_ENUM_FIELD(querySource, QuerySource);
+	local_node->queryId = 0;	/* not saved in output format */
 	READ_BOOL_FIELD(canSetTag);
 	READ_NODE_FIELD(utilityStmt);
 	READ_INT_FIELD(resultRelation);
-	READ_NODE_FIELD(intoClause);
 	READ_BOOL_FIELD(hasAggs);
 	READ_BOOL_FIELD(hasWindowFuncs);
 	READ_BOOL_FIELD(hasSubLinks);
@@ -393,6 +394,7 @@ _readIntoClause(void)
 	READ_NODE_FIELD(options);
 	READ_ENUM_FIELD(onCommit, OnCommitAction);
 	READ_STRING_FIELD(tableSpaceName);
+	READ_BOOL_FIELD(skipData);
 
 	READ_DONE();
 }
@@ -1190,6 +1192,7 @@ _readRangeTblEntry(void)
 			break;
 		case RTE_SUBQUERY:
 			READ_NODE_FIELD(subquery);
+			READ_BOOL_FIELD(security_barrier);
 			break;
 		case RTE_JOIN:
 			READ_ENUM_FIELD(jointype, JoinType);

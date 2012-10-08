@@ -332,7 +332,7 @@ ecpg_store_result(const PGresult *results, int act_field,
 		 */
 		if ((var->arrsize > 0 && ntuples > var->arrsize) || (var->ind_arrsize > 0 && ntuples > var->ind_arrsize))
 		{
-			ecpg_log("ecpg_store_result on line %d: incorrect number of matches; %d don't fit into array of %d\n",
+			ecpg_log("ecpg_store_result on line %d: incorrect number of matches; %d don't fit into array of %ld\n",
 					 stmt->lineno, ntuples, var->arrsize);
 			ecpg_raise(stmt->lineno, INFORMIX_MODE(stmt->compat) ? ECPG_INFORMIX_SUBSELECT_NOT_ONE : ECPG_TOO_MANY_MATCHES, ECPG_SQLSTATE_CARDINALITY_VIOLATION, NULL);
 			return false;
@@ -1074,7 +1074,7 @@ ecpg_store_input(const int lineno, const bool force_indicator, const struct vari
 
 			default:
 				/* Not implemented yet */
-				ecpg_raise(lineno, ECPG_UNSUPPORTED, ECPG_SQLSTATE_ECPG_INTERNAL_ERROR, (char *) ecpg_type_name(var->type));
+				ecpg_raise(lineno, ECPG_UNSUPPORTED, ECPG_SQLSTATE_ECPG_INTERNAL_ERROR, ecpg_type_name(var->type));
 				return false;
 				break;
 		}
@@ -1083,7 +1083,7 @@ ecpg_store_input(const int lineno, const bool force_indicator, const struct vari
 }
 
 static void
-free_params(const char **paramValues, int nParams, bool print, int lineno)
+free_params(char **paramValues, int nParams, bool print, int lineno)
 {
 	int			n;
 
@@ -1091,7 +1091,7 @@ free_params(const char **paramValues, int nParams, bool print, int lineno)
 	{
 		if (print)
 			ecpg_log("free_params on line %d: parameter %d = %s\n", lineno, n + 1, paramValues[n] ? paramValues[n] : "null");
-		ecpg_free((void *) (paramValues[n]));
+		ecpg_free(paramValues[n]);
 	}
 	ecpg_free(paramValues);
 }
@@ -1138,7 +1138,7 @@ ecpg_execute(struct statement * stmt)
 	PGnotify   *notify;
 	struct variable *var;
 	int			desc_counter = 0;
-	const char **paramValues = NULL;
+	char	  **paramValues = NULL;
 	int			nParams = 0;
 	int			position = 0;
 	struct sqlca_t *sqlca = ECPGget_sqlca();
@@ -1380,7 +1380,7 @@ ecpg_execute(struct statement * stmt)
 		else
 		{
 			nParams++;
-			if (!(paramValues = (const char **) ecpg_realloc(paramValues, sizeof(const char *) * nParams, stmt->lineno)))
+			if (!(paramValues = (char **) ecpg_realloc(paramValues, sizeof(char *) * nParams, stmt->lineno)))
 			{
 				ecpg_free(paramValues);
 				return false;
@@ -1441,7 +1441,7 @@ ecpg_execute(struct statement * stmt)
 	ecpg_log("ecpg_execute on line %d: query: %s; with %d parameter(s) on connection %s\n", stmt->lineno, stmt->command, nParams, stmt->connection->name);
 	if (stmt->statement_type == ECPGst_execute)
 	{
-		results = PQexecPrepared(stmt->connection->connection, stmt->name, nParams, paramValues, NULL, NULL, 0);
+		results = PQexecPrepared(stmt->connection->connection, stmt->name, nParams, (const char *const *) paramValues, NULL, NULL, 0);
 		ecpg_log("ecpg_execute on line %d: using PQexecPrepared for \"%s\"\n", stmt->lineno, stmt->command);
 	}
 	else
@@ -1453,7 +1453,7 @@ ecpg_execute(struct statement * stmt)
 		}
 		else
 		{
-			results = PQexecParams(stmt->connection->connection, stmt->command, nParams, NULL, paramValues, NULL, NULL, 0);
+			results = PQexecParams(stmt->connection->connection, stmt->command, nParams, NULL, (const char *const *) paramValues, NULL, NULL, 0);
 			ecpg_log("ecpg_execute on line %d: using PQexecParams\n", stmt->lineno);
 		}
 	}
@@ -1650,9 +1650,9 @@ ecpg_execute(struct statement * stmt)
 			ecpg_log("ecpg_execute on line %d: OK: %s\n", stmt->lineno, cmdstat);
 			if (stmt->compat != ECPG_COMPAT_INFORMIX_SE &&
 				!sqlca->sqlerrd[2] &&
-				(!strncmp(cmdstat, "UPDATE", 6)
-				 || !strncmp(cmdstat, "INSERT", 6)
-				 || !strncmp(cmdstat, "DELETE", 6)))
+				(strncmp(cmdstat, "UPDATE", 6) == 0
+				 || strncmp(cmdstat, "INSERT", 6) == 0
+				 || strncmp(cmdstat, "DELETE", 6) == 0))
 				ecpg_raise(stmt->lineno, ECPG_NOT_FOUND, ECPG_SQLSTATE_NO_DATA, NULL);
 			break;
 		case PGRES_COPY_OUT:
@@ -1776,6 +1776,7 @@ ECPGdo(const int lineno, const int compat, const int force_indicator, const char
 		{
 			setlocale(LC_NUMERIC, oldlocale);
 			ecpg_free(oldlocale);
+			free_statement(stmt);
 			va_end(args);
 			return (false);
 		}
@@ -1807,6 +1808,7 @@ ECPGdo(const int lineno, const int compat, const int force_indicator, const char
 			ecpg_raise(lineno, ECPG_INVALID_STMT, ECPG_SQLSTATE_INVALID_SQL_STATEMENT_NAME, stmt->command);
 			setlocale(LC_NUMERIC, oldlocale);
 			ecpg_free(oldlocale);
+			free_statement(stmt);
 			va_end(args);
 			return (false);
 		}
@@ -1940,7 +1942,7 @@ bool
 ECPGdo_descriptor(int line, const char *connection,
 				  const char *descriptor, const char *query)
 {
-	return ECPGdo(line, ECPG_COMPAT_PGSQL, true, connection, '\0', 0, (char *) query, ECPGt_EOIT,
+	return ECPGdo(line, ECPG_COMPAT_PGSQL, true, connection, '\0', 0, query, ECPGt_EOIT,
 				  ECPGt_descriptor, descriptor, 0L, 0L, 0L,
 				  ECPGt_NO_INDICATOR, NULL, 0L, 0L, 0L, ECPGt_EORT);
 }

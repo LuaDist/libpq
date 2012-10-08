@@ -9,7 +9,7 @@
  * in cluster.c.
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -214,6 +214,9 @@ vacuum(VacuumStmt *vacstmt, Oid relid, bool do_toast,
 
 		VacuumCostActive = (VacuumCostDelay > 0);
 		VacuumCostBalance = 0;
+		VacuumPageHit = 0;
+		VacuumPageMiss = 0;
+		VacuumPageDirty = 0;
 
 		/*
 		 * Loop to process each selected relation.
@@ -318,7 +321,16 @@ get_rel_oids(Oid relid, const RangeVar *vacrel)
 		/* Process a specific relation */
 		Oid			relid;
 
-		relid = RangeVarGetRelid(vacrel, false);
+		/*
+		 * Since we don't take a lock here, the relation might be gone, or the
+		 * RangeVar might no longer refer to the OID we look up here.  In the
+		 * former case, VACUUM will do nothing; in the latter case, it will
+		 * process the OID we looked up here, rather than the new one.
+		 * Neither is ideal, but there's little practical alternative, since
+		 * we're going to commit this transaction and begin a new one between
+		 * now and then.
+		 */
+		relid = RangeVarGetRelid(vacrel, NoLock, false);
 
 		/* Make a relation list entry for this guy */
 		oldcontext = MemoryContextSwitchTo(vac_context);
@@ -560,6 +572,7 @@ vac_estimate_reltuples(Relation relation, bool is_analyze,
 void
 vac_update_relstats(Relation relation,
 					BlockNumber num_pages, double num_tuples,
+					BlockNumber num_all_visible_pages,
 					bool hasindex, TransactionId frozenxid)
 {
 	Oid			relid = RelationGetRelid(relation);
@@ -588,6 +601,11 @@ vac_update_relstats(Relation relation,
 	if (pgcform->reltuples != (float4) num_tuples)
 	{
 		pgcform->reltuples = (float4) num_tuples;
+		dirty = true;
+	}
+	if (pgcform->relallvisible != (int32) num_all_visible_pages)
+	{
+		pgcform->relallvisible = (int32) num_all_visible_pages;
 		dirty = true;
 	}
 	if (pgcform->relhasindex != hasindex)
@@ -874,13 +892,13 @@ vacuum_rel(Oid relid, VacuumStmt *vacstmt, bool do_toast, bool for_wraparound)
 		 *
 		 * Note: these flags remain set until CommitTransaction or
 		 * AbortTransaction.  We don't want to clear them until we reset
-		 * MyProc->xid/xmin, else OldestXmin might appear to go backwards,
+		 * MyPgXact->xid/xmin, else OldestXmin might appear to go backwards,
 		 * which is probably Not Good.
 		 */
 		LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
-		MyProc->vacuumFlags |= PROC_IN_VACUUM;
+		MyPgXact->vacuumFlags |= PROC_IN_VACUUM;
 		if (for_wraparound)
-			MyProc->vacuumFlags |= PROC_VACUUM_FOR_WRAPAROUND;
+			MyPgXact->vacuumFlags |= PROC_VACUUM_FOR_WRAPAROUND;
 		LWLockRelease(ProcArrayLock);
 	}
 

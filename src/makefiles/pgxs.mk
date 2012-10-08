@@ -64,6 +64,16 @@ include $(top_builddir)/src/Makefile.global
 top_srcdir = $(top_builddir)
 srcdir = .
 VPATH =
+
+# These might be set in Makefile.global, but if they were not found
+# during the build of PostgreSQL, supply default values so that users
+# of pgxs can use the variables.
+ifeq ($(BISON),)
+BISON = bison
+endif
+ifeq ($(FLEX),)
+FLEX = flex
+endif
 endif
 
 
@@ -207,7 +217,7 @@ ifdef OBJS
 	rm -f $(OBJS)
 endif
 ifdef EXTRA_CLEAN
-	rm -f $(EXTRA_CLEAN)
+	rm -rf $(EXTRA_CLEAN)
 endif
 ifdef REGRESS
 # things created by various check targets
@@ -256,7 +266,7 @@ ifndef PGXS
 endif
 
 # against installed postmaster
-installcheck: submake
+installcheck: submake $(REGRESS_PREP)
 	$(pg_regress_installcheck) $(REGRESS_OPTS) $(REGRESS)
 
 ifdef PGXS
@@ -264,7 +274,7 @@ check:
 	@echo '"$(MAKE) check" is not supported.'
 	@echo 'Do "$(MAKE) install", then "$(MAKE) installcheck" instead.'
 else
-check: all submake
+check: all submake $(REGRESS_PREP)
 	$(pg_regress_check) --extra-install=$(subdir) $(REGRESS_OPTS) $(REGRESS)
 endif
 endif # REGRESS

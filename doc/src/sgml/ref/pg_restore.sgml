@@ -25,7 +25,7 @@
    <command>pg_restore</command>
    <arg rep="repeat"><replaceable>connection-option</replaceable></arg>
    <arg rep="repeat"><replaceable>option</replaceable></arg>
-   <arg><replaceable>filename</replaceable></arg>
+   <arg choice="opt"><replaceable>filename</replaceable></arg>
   </cmdsynopsis>
  </refsynopsisdiv>
 
@@ -92,6 +92,13 @@
       <listitem>
        <para>
         Restore only the data, not the schema (data definitions).
+        Table data, large objects, and sequence values are restored,
+        if present in the archive.
+       </para>
+
+       <para>
+        This option is similar to, but for historical reasons not identical
+        to, specifying <option>--section=data</>.
        </para>
       </listitem>
      </varlistentry>
@@ -354,8 +361,16 @@
       <term><option>--schema-only</option></term>
       <listitem>
        <para>
-        Restore only the schema (data definitions), not the data (table
-        contents).  Current sequence values will not be restored, either.
+        Restore only the schema (data definitions), not data,
+        to the extent that schema entries are present in the archive.
+       </para>
+       <para>
+        This option is the inverse of <option>--data-only</>.
+        It is similar to, but for historical reasons not identical to,
+        specifying
+        <option>--section=pre-data --section=post-data</>.
+       </para>
+       <para>
         (Do not confuse this with the <option>--schema</> option, which
         uses the word <quote>schema</> in a different meaning.)
        </para>
@@ -502,6 +517,25 @@
         tablespace is the default during restore.
        </para>
       </listitem>
+     </varlistentry>
+
+     <varlistentry>
+       <term><option>--section=<replaceable class="parameter">sectionname</replaceable></option></term>
+       <listitem>
+         <para>
+          Only restore the named section. The section name can be
+          <option>pre-data</>, <option>data</>, or <option>post-data</>.
+          This option can be specified more than once to select multiple
+          sections. The default is to restore all sections.
+         </para>
+         <para>
+          The data section contains actual table data as well as large-object
+          definitions.
+          Post-data items consist of definitions of indexes, triggers, rules
+          and constraints other than validated check constraints.
+          Pre-data items consist of all other data definition items.
+         </para>
+       </listitem>
      </varlistentry>
 
      <varlistentry>

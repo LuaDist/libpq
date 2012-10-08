@@ -3,7 +3,7 @@
  * initsplan.c
  *	  Target list, qualification, joininfo initialization routines
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -14,11 +14,9 @@
  */
 #include "postgres.h"
 
-#include "catalog/pg_operator.h"
 #include "catalog/pg_type.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
-#include "optimizer/cost.h"
 #include "optimizer/joininfo.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
@@ -27,11 +25,7 @@
 #include "optimizer/prep.h"
 #include "optimizer/restrictinfo.h"
 #include "optimizer/var.h"
-#include "parser/parse_expr.h"
-#include "parser/parse_oper.h"
-#include "utils/builtins.h"
 #include "utils/lsyscache.h"
-#include "utils/syscache.h"
 
 
 /* These parameters are set by GUC */
@@ -198,9 +192,9 @@ add_vars_to_targetlist(PlannerInfo *root, List *vars,
 												where_needed);
 
 			/*
-			 * If we are creating PlaceHolderInfos, mark them with the
-			 * correct maybe-needed locations.  Otherwise, it's too late to
-			 * change that.
+			 * If we are creating PlaceHolderInfos, mark them with the correct
+			 * maybe-needed locations.	Otherwise, it's too late to change
+			 * that.
 			 */
 			if (create_new_ph)
 				mark_placeholder_maybe_needed(root, phinfo, where_needed);
@@ -1023,6 +1017,7 @@ distribute_qual_to_rels(PlannerInfo *root, Node *clause,
 									 outerjoin_delayed,
 									 pseudoconstant,
 									 relids,
+									 outerjoin_nonnullable,
 									 nullable_relids);
 
 	/*
@@ -1472,6 +1467,7 @@ build_implied_join_equality(Oid opno,
 									 false,		/* outerjoin_delayed */
 									 false,		/* pseudoconstant */
 									 qualscope, /* required_relids */
+									 NULL,		/* outer_relids */
 									 NULL);		/* nullable_relids */
 
 	/* Set mergejoinability/hashjoinability flags */

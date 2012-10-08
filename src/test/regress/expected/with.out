@@ -277,18 +277,19 @@ SELECT pg_get_viewdef('vsubdepartment'::regclass);
 (1 row)
 
 SELECT pg_get_viewdef('vsubdepartment'::regclass, true);
-                                    pg_get_viewdef                                    
---------------------------------------------------------------------------------------
-  WITH RECURSIVE subdepartment AS (                                                  +
-                  SELECT department.id, department.parent_department, department.name+
-                    FROM department                                                  +
-                   WHERE department.name = 'A'::text                                 +
-         UNION ALL                                                                   +
-                  SELECT d.id, d.parent_department, d.name                           +
-                    FROM department d, subdepartment sd                              +
-                   WHERE d.parent_department = sd.id                                 +
-         )                                                                           +
-  SELECT subdepartment.id, subdepartment.parent_department, subdepartment.name       +
+                                pg_get_viewdef                                 
+-------------------------------------------------------------------------------
+  WITH RECURSIVE subdepartment AS (                                           +
+                  SELECT department.id, department.parent_department,         +
+                     department.name                                          +
+                    FROM department                                           +
+                   WHERE department.name = 'A'::text                          +
+         UNION ALL                                                            +
+                  SELECT d.id, d.parent_department, d.name                    +
+                    FROM department d, subdepartment sd                       +
+                   WHERE d.parent_department = sd.id                          +
+         )                                                                    +
+  SELECT subdepartment.id, subdepartment.parent_department, subdepartment.name+
     FROM subdepartment;
 (1 row)
 
@@ -1065,7 +1066,7 @@ with cte(foo) as ( select 42 ) select * from ((select foo from cte)) q;
 select ( with cte(foo) as ( values(f1) )
          select (select foo from cte) )
 from int4_tbl;
-  ?column?   
+     foo     
 -------------
            0
       123456
@@ -1077,7 +1078,7 @@ from int4_tbl;
 select ( with cte(foo) as ( values(f1) )
           values((select foo from cte)) )
 from int4_tbl;
-  ?column?   
+   column1   
 -------------
            0
       123456
@@ -1158,6 +1159,153 @@ SELECT * FROM t;
  10
  10
 (55 rows)
+
+--
+-- test WITH attached to intermediate-level set operation
+--
+WITH outermost(x) AS (
+  SELECT 1
+  UNION (WITH innermost as (SELECT 2)
+         SELECT * FROM innermost
+         UNION SELECT 3)
+)
+SELECT * FROM outermost;
+ x 
+---
+ 1
+ 2
+ 3
+(3 rows)
+
+WITH outermost(x) AS (
+  SELECT 1
+  UNION (WITH innermost as (SELECT 2)
+         SELECT * FROM outermost  -- fail
+         UNION SELECT * FROM innermost)
+)
+SELECT * FROM outermost;
+ERROR:  relation "outermost" does not exist
+LINE 4:          SELECT * FROM outermost  
+                               ^
+DETAIL:  There is a WITH item named "outermost", but it cannot be referenced from this part of the query.
+HINT:  Use WITH RECURSIVE, or re-order the WITH items to remove forward references.
+WITH RECURSIVE outermost(x) AS (
+  SELECT 1
+  UNION (WITH innermost as (SELECT 2)
+         SELECT * FROM outermost
+         UNION SELECT * FROM innermost)
+)
+SELECT * FROM outermost;
+ x 
+---
+ 1
+ 2
+(2 rows)
+
+WITH RECURSIVE outermost(x) AS (
+  WITH innermost as (SELECT 2 FROM outermost) -- fail
+    SELECT * FROM innermost
+    UNION SELECT * from outermost
+)
+SELECT * FROM outermost;
+ERROR:  recursive reference to query "outermost" must not appear within a subquery
+LINE 2:   WITH innermost as (SELECT 2 FROM outermost) 
+                                           ^
+--
+-- This test will fail with the old implementation of PARAM_EXEC parameter
+-- assignment, because the "q1" Var passed down to A's targetlist subselect
+-- looks exactly like the "A.id" Var passed down to C's subselect, causing
+-- the old code to give them the same runtime PARAM_EXEC slot.  But the
+-- lifespans of the two parameters overlap, thanks to B also reading A.
+--
+with
+A as ( select q2 as id, (select q1) as x from int8_tbl ),
+B as ( select id, row_number() over (partition by id) as r from A ),
+C as ( select A.id, array(select B.id from B where B.id = A.id) from A )
+select * from C;
+        id         |                array                
+-------------------+-------------------------------------
+               456 | {456}
+  4567890123456789 | {4567890123456789,4567890123456789}
+               123 | {123}
+  4567890123456789 | {4567890123456789,4567890123456789}
+ -4567890123456789 | {-4567890123456789}
+(5 rows)
+
+--
+-- Test CTEs read in non-initialization orders
+--
+WITH RECURSIVE
+  tab(id_key,link) AS (VALUES (1,17), (2,17), (3,17), (4,17), (6,17), (5,17)),
+  iter (id_key, row_type, link) AS (
+      SELECT 0, 'base', 17
+    UNION ALL (
+      WITH remaining(id_key, row_type, link, min) AS (
+        SELECT tab.id_key, 'true'::text, iter.link, MIN(tab.id_key) OVER ()
+        FROM tab INNER JOIN iter USING (link)
+        WHERE tab.id_key > iter.id_key
+      ),
+      first_remaining AS (
+        SELECT id_key, row_type, link
+        FROM remaining
+        WHERE id_key=min
+      ),
+      effect AS (
+        SELECT tab.id_key, 'new'::text, tab.link
+        FROM first_remaining e INNER JOIN tab ON e.id_key=tab.id_key
+        WHERE e.row_type = 'false'
+      )
+      SELECT * FROM first_remaining
+      UNION ALL SELECT * FROM effect
+    )
+  )
+SELECT * FROM iter;
+ id_key | row_type | link 
+--------+----------+------
+      0 | base     |   17
+      1 | true     |   17
+      2 | true     |   17
+      3 | true     |   17
+      4 | true     |   17
+      5 | true     |   17
+      6 | true     |   17
+(7 rows)
+
+WITH RECURSIVE
+  tab(id_key,link) AS (VALUES (1,17), (2,17), (3,17), (4,17), (6,17), (5,17)),
+  iter (id_key, row_type, link) AS (
+      SELECT 0, 'base', 17
+    UNION (
+      WITH remaining(id_key, row_type, link, min) AS (
+        SELECT tab.id_key, 'true'::text, iter.link, MIN(tab.id_key) OVER ()
+        FROM tab INNER JOIN iter USING (link)
+        WHERE tab.id_key > iter.id_key
+      ),
+      first_remaining AS (
+        SELECT id_key, row_type, link
+        FROM remaining
+        WHERE id_key=min
+      ),
+      effect AS (
+        SELECT tab.id_key, 'new'::text, tab.link
+        FROM first_remaining e INNER JOIN tab ON e.id_key=tab.id_key
+        WHERE e.row_type = 'false'
+      )
+      SELECT * FROM first_remaining
+      UNION ALL SELECT * FROM effect
+    )
+  )
+SELECT * FROM iter;
+ id_key | row_type | link 
+--------+----------+------
+      0 | base     |   17
+      1 | true     |   17
+      2 | true     |   17
+      3 | true     |   17
+      4 | true     |   17
+      5 | true     |   17
+      6 | true     |   17
+(7 rows)
 
 --
 -- Data-modifying statements in WITH
@@ -1800,6 +1948,104 @@ SELECT * FROM y;
 
 DROP TRIGGER y_trig ON y;
 DROP FUNCTION y_trigger();
+-- WITH attached to inherited UPDATE or DELETE
+CREATE TEMP TABLE parent ( id int, val text );
+CREATE TEMP TABLE child1 ( ) INHERITS ( parent );
+CREATE TEMP TABLE child2 ( ) INHERITS ( parent );
+INSERT INTO parent VALUES ( 1, 'p1' );
+INSERT INTO child1 VALUES ( 11, 'c11' ),( 12, 'c12' );
+INSERT INTO child2 VALUES ( 23, 'c21' ),( 24, 'c22' );
+WITH rcte AS ( SELECT sum(id) AS totalid FROM parent )
+UPDATE parent SET id = id + totalid FROM rcte;
+SELECT * FROM parent;
+ id | val 
+----+-----
+ 72 | p1
+ 82 | c11
+ 83 | c12
+ 94 | c21
+ 95 | c22
+(5 rows)
+
+WITH wcte AS ( INSERT INTO child1 VALUES ( 42, 'new' ) RETURNING id AS newid )
+UPDATE parent SET id = id + newid FROM wcte;
+SELECT * FROM parent;
+ id  | val 
+-----+-----
+ 114 | p1
+  42 | new
+ 124 | c11
+ 125 | c12
+ 136 | c21
+ 137 | c22
+(6 rows)
+
+WITH rcte AS ( SELECT max(id) AS maxid FROM parent )
+DELETE FROM parent USING rcte WHERE id = maxid;
+SELECT * FROM parent;
+ id  | val 
+-----+-----
+ 114 | p1
+  42 | new
+ 124 | c11
+ 125 | c12
+ 136 | c21
+(5 rows)
+
+WITH wcte AS ( INSERT INTO child2 VALUES ( 42, 'new2' ) RETURNING id AS newid )
+DELETE FROM parent USING wcte WHERE id = newid;
+SELECT * FROM parent;
+ id  | val  
+-----+------
+ 114 | p1
+ 124 | c11
+ 125 | c12
+ 136 | c21
+  42 | new2
+(5 rows)
+
+-- check EXPLAIN VERBOSE for a wCTE with RETURNING
+EXPLAIN (VERBOSE, COSTS OFF)
+WITH wcte AS ( INSERT INTO int8_tbl VALUES ( 42, 47 ) RETURNING q2 )
+DELETE FROM a USING wcte WHERE aa = q2;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Delete on public.a
+   CTE wcte
+     ->  Insert on public.int8_tbl
+           Output: int8_tbl.q2
+           ->  Result
+                 Output: 42::bigint, 47::bigint
+   ->  Nested Loop
+         Output: public.a.ctid, wcte.*
+         Join Filter: (public.a.aa = wcte.q2)
+         ->  Seq Scan on public.a
+               Output: public.a.ctid, public.a.aa
+         ->  CTE Scan on wcte
+               Output: wcte.*, wcte.q2
+   ->  Nested Loop
+         Output: public.a.ctid, wcte.*
+         Join Filter: (public.a.aa = wcte.q2)
+         ->  Seq Scan on public.b a
+               Output: public.a.ctid, public.a.aa
+         ->  CTE Scan on wcte
+               Output: wcte.*, wcte.q2
+   ->  Nested Loop
+         Output: public.a.ctid, wcte.*
+         Join Filter: (public.a.aa = wcte.q2)
+         ->  Seq Scan on public.c a
+               Output: public.a.ctid, public.a.aa
+         ->  CTE Scan on wcte
+               Output: wcte.*, wcte.q2
+   ->  Nested Loop
+         Output: public.a.ctid, wcte.*
+         Join Filter: (public.a.aa = wcte.q2)
+         ->  Seq Scan on public.d a
+               Output: public.a.ctid, public.a.aa
+         ->  CTE Scan on wcte
+               Output: wcte.*, wcte.q2
+(34 rows)
+
 -- error cases
 -- data-modifying WITH tries to use its own output
 WITH RECURSIVE t AS (

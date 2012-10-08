@@ -16,7 +16,7 @@
  * index qual conditions.
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -35,7 +35,6 @@
  */
 #include "postgres.h"
 
-#include "access/heapam.h"
 #include "access/relscan.h"
 #include "access/transam.h"
 #include "executor/execdebug.h"
@@ -44,6 +43,7 @@
 #include "storage/bufmgr.h"
 #include "storage/predicate.h"
 #include "utils/memutils.h"
+#include "utils/rel.h"
 #include "utils/snapmgr.h"
 #include "utils/tqual.h"
 
@@ -66,7 +66,10 @@ BitmapHeapNext(BitmapHeapScanState *node)
 	TIDBitmap  *tbm;
 	TBMIterator *tbmiterator;
 	TBMIterateResult *tbmres;
+
+#ifdef USE_PREFETCH
 	TBMIterator *prefetch_iterator;
+#endif
 	OffsetNumber targoffset;
 	TupleTableSlot *slot;
 
@@ -79,7 +82,9 @@ BitmapHeapNext(BitmapHeapScanState *node)
 	tbm = node->tbm;
 	tbmiterator = node->tbmiterator;
 	tbmres = node->tbmres;
+#ifdef USE_PREFETCH
 	prefetch_iterator = node->prefetch_iterator;
+#endif
 
 	/*
 	 * If we haven't yet performed the underlying index scan, do it, and begin
@@ -278,6 +283,7 @@ BitmapHeapNext(BitmapHeapScanState *node)
 			if (!ExecQual(node->bitmapqualorig, econtext, false))
 			{
 				/* Fails recheck, so drop it and loop back for another */
+				InstrCountFiltered2(node, 1);
 				ExecClearTuple(slot);
 				continue;
 			}
@@ -350,9 +356,11 @@ bitgetpage(HeapScanDesc scan, TBMIterateResult *tbmres)
 		{
 			OffsetNumber offnum = tbmres->offsets[curslot];
 			ItemPointerData tid;
+			HeapTupleData heapTuple;
 
 			ItemPointerSet(&tid, page, offnum);
-			if (heap_hot_search_buffer(&tid, scan->rs_rd, buffer, snapshot, NULL))
+			if (heap_hot_search_buffer(&tid, scan->rs_rd, buffer, snapshot,
+									   &heapTuple, NULL, true))
 				scan->rs_vistuples[ntup++] = ItemPointerGetOffsetNumber(&tid);
 		}
 	}

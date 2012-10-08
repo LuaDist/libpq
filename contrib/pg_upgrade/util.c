@@ -3,9 +3,11 @@
  *
  *	utility functions
  *
- *	Copyright (c) 2010-2011, PostgreSQL Global Development Group
+ *	Copyright (c) 2010-2012, PostgreSQL Global Development Group
  *	contrib/pg_upgrade/util.c
  */
+
+#include "postgres.h"
 
 #include "pg_upgrade.h"
 
@@ -75,18 +77,28 @@ pg_log(eLogType type, char *fmt,...)
 	vsnprintf(message, sizeof(message), fmt, args);
 	va_end(args);
 
-	if (log_opts.fd != NULL)
+	/* PG_VERBOSE is only output in verbose mode */
+	/* fopen() on log_opts.internal might have failed, so check it */
+	if ((type != PG_VERBOSE || log_opts.verbose) && log_opts.internal != NULL)
 	{
-		fwrite(message, strlen(message), 1, log_opts.fd);
-		/* if we are using OVERWRITE_MESSAGE, add newline */
+		/*
+		 * There's nothing much we can do about it if fwrite fails, but some
+		 * platforms declare fwrite with warn_unused_result.  Do a little
+		 * dance with casting to void to shut up the compiler in such cases.
+		 */
+		size_t		rc;
+
+		rc = fwrite(message, strlen(message), 1, log_opts.internal);
+		/* if we are using OVERWRITE_MESSAGE, add newline to log file */
 		if (strchr(message, '\r') != NULL)
-			fwrite("\n", 1, 1, log_opts.fd);
-		fflush(log_opts.fd);
+			rc = fwrite("\n", 1, 1, log_opts.internal);
+		(void) rc;
+		fflush(log_opts.internal);
 	}
 
 	switch (type)
 	{
-		case PG_INFO:
+		case PG_VERBOSE:
 			if (log_opts.verbose)
 				printf("%s", _(message));
 			break;
@@ -100,11 +112,6 @@ pg_log(eLogType type, char *fmt,...)
 			printf("\n%s", _(message));
 			printf("Failure, exiting\n");
 			exit(1);
-			break;
-
-		case PG_DEBUG:
-			if (log_opts.debug)
-				fprintf(log_opts.debug_fd, "%s\n", _(message));
 			break;
 
 		default:
@@ -185,9 +192,20 @@ get_user_info(char **user_name)
 
 
 void *
-pg_malloc(int n)
+pg_malloc(size_t n)
 {
 	void	   *p = malloc(n);
+
+	if (p == NULL)
+		pg_log(PG_FATAL, "%s: out of memory\n", os_info.progname);
+
+	return p;
+}
+
+void *
+pg_realloc(void *ptr, size_t n)
+{
+	void	   *p = realloc(ptr, n);
 
 	if (p == NULL)
 		pg_log(PG_FATAL, "%s: out of memory\n", os_info.progname);
@@ -230,7 +248,7 @@ getErrorText(int errNum)
 #ifdef WIN32
 	_dosmaperr(GetLastError());
 #endif
-	return strdup(strerror(errNum));
+	return pg_strdup(strerror(errNum));
 }
 
 

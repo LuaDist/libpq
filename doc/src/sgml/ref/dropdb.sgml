@@ -97,6 +97,16 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
+      <term><option>--if-exists</></term>
+      <listitem>
+       <para>
+       Do not throw an error if the database does not exist. A notice is issued
+       in this case.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
        <term><option>-?</></term>
        <term><option>--help</></term>
        <listitem>
@@ -183,6 +193,18 @@ PostgreSQL documentation
         connection attempt finding out that the server wants a password.
         In some cases it is worth typing <option>-W</> to avoid the extra
         connection attempt.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><option>--maintenance-db=<replaceable class="parameter">dbname</replaceable></></term>
+      <listitem>
+       <para>
+         Specifies the name of the database to connect to in order to drop the
+         target database. If not specified, the <literal>postgres</literal>
+         database will be used; if that does not exist (or is the database
+         being dropped), <literal>template1</literal> will be used.
        </para>
       </listitem>
      </varlistentry>

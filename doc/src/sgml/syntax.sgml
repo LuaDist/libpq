@@ -664,7 +664,7 @@ $function$
     </para>
    </sect3>
 
-   <sect3>
+   <sect3 id="sql-syntax-constants-numeric">
     <title>Numeric Constants</title>
 
     <indexterm>
@@ -852,7 +852,7 @@ CAST ( '<replaceable>string</replaceable>' AS <replaceable>type</replaceable> )
    </para>
   </sect2>
 
-  <sect2>
+  <sect2 id="sql-syntax-special-chars">
    <title>Special Characters</title>
 
   <para>
@@ -1310,7 +1310,7 @@ SELECT 3 OPERATOR(pg_catalog.+) 4;
    the remaining options.
   </para>
 
-  <sect2>
+  <sect2 id="sql-expressions-column-refs">
    <title>Column References</title>
 
    <indexterm>
@@ -1333,7 +1333,7 @@ SELECT 3 OPERATOR(pg_catalog.+) 4;
    </para>
   </sect2>
 
-  <sect2>
+  <sect2 id="sql-expressions-parameters-positional">
    <title>Positional Parameters</title>
 
    <indexterm>
@@ -1373,7 +1373,7 @@ CREATE FUNCTION dept(text) RETURNS dept
    </para>
   </sect2>
 
-  <sect2>
+  <sect2 id="sql-expressions-subscripts">
    <title>Subscripts</title>
 
    <indexterm>
@@ -1468,7 +1468,7 @@ $1.somecolumn
    </para>
   </sect2>
 
-  <sect2>
+  <sect2 id="sql-expressions-operator-calls">
    <title>Operator Invocations</title>
 
    <indexterm>
@@ -1497,7 +1497,7 @@ $1.somecolumn
    </para>
   </sect2>
 
-  <sect2>
+  <sect2 id="sql-expressions-function-calls">
    <title>Function Calls</title>
 
    <indexterm>
@@ -1806,7 +1806,7 @@ UNBOUNDED FOLLOWING
     The syntaxes using <literal>*</> are used for calling parameter-less
     aggregate functions as window functions, for example
     <literal>count(*) OVER (PARTITION BY x ORDER BY y)</>.
-    <literal>*</> is customarily not used for non-aggregate window functions.
+    The asterisk (<literal>*</>) is customarily not used for non-aggregate window functions.
     Aggregate window functions, unlike normal aggregate functions, do not
     allow <literal>DISTINCT</> or <literal>ORDER BY</> to be used within the
     function argument list.
@@ -2109,9 +2109,9 @@ SELECT ARRAY[]::integer[];
    bracketed) subquery. For example:
 <programlisting>
 SELECT ARRAY(SELECT oid FROM pg_proc WHERE proname LIKE 'bytea%');
-                          ?column?
--------------------------------------------------------------
- {2011,1954,1948,1952,1951,1244,1950,2005,1949,1953,2006,31}
+                                 array
+-----------------------------------------------------------------------
+ {2011,1954,1948,1952,1951,1244,1950,2005,1949,1953,2006,31,2412,2413}
 (1 row)
 </programlisting>
    The subquery must return a single column. The resulting

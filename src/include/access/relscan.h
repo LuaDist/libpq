@@ -4,7 +4,7 @@
  *	  POSTGRES relation scan descriptor definitions.
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/access/relscan.h
@@ -16,6 +16,8 @@
 
 #include "access/genam.h"
 #include "access/heapam.h"
+#include "access/itup.h"
+#include "access/tupdesc.h"
 
 
 typedef struct HeapScanDescData
@@ -66,6 +68,7 @@ typedef struct IndexScanDescData
 	int			numberOfOrderBys;		/* number of ordering operators */
 	ScanKey		keyData;		/* array of index qualifier descriptors */
 	ScanKey		orderByData;	/* array of ordering op descriptors */
+	bool		xs_want_itup;	/* caller requests index tuples */
 
 	/* signaling to index AM about killing index tuples */
 	bool		kill_prior_tuple;		/* last-returned tuple is dead */
@@ -76,6 +79,10 @@ typedef struct IndexScanDescData
 	/* index access method's private state */
 	void	   *opaque;			/* access-method-specific info */
 
+	/* in an index-only scan, this is valid after a successful amgettuple */
+	IndexTuple	xs_itup;		/* index tuple returned by AM */
+	TupleDesc	xs_itupdesc;	/* rowtype descriptor of xs_itup */
+
 	/* xs_ctup/xs_cbuf/xs_recheck are valid after a successful index_getnext */
 	HeapTupleData xs_ctup;		/* current heap tuple, if any */
 	Buffer		xs_cbuf;		/* current heap buffer in scan, if any */
@@ -83,9 +90,7 @@ typedef struct IndexScanDescData
 	bool		xs_recheck;		/* T means scan keys must be rechecked */
 
 	/* state data for traversing HOT chains in index_getnext */
-	bool		xs_hot_dead;	/* T if all members of HOT chain are dead */
-	OffsetNumber xs_next_hot;	/* next member of HOT chain, if any */
-	TransactionId xs_prev_xmax; /* previous HOT chain member's XMAX, if any */
+	bool		xs_continue_hot;	/* T if must keep walking HOT chain */
 }	IndexScanDescData;
 
 /* Struct for heap-or-index scans of system tables */

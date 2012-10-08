@@ -4,7 +4,7 @@
  *	  routines to support running postgres in 'bootstrap' mode
  *	bootstrap mode is used to create the initial template database
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -21,9 +21,6 @@
 #include <getopt.h>
 #endif
 
-#include "access/genam.h"
-#include "access/heapam.h"
-#include "access/xact.h"
 #include "bootstrap/bootstrap.h"
 #include "catalog/index.h"
 #include "catalog/pg_collation.h"
@@ -32,17 +29,18 @@
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "postmaster/bgwriter.h"
+#include "postmaster/startup.h"
 #include "postmaster/walwriter.h"
 #include "replication/walreceiver.h"
 #include "storage/bufmgr.h"
 #include "storage/ipc.h"
 #include "storage/proc.h"
-#include "storage/procsignal.h"
 #include "tcop/tcopprot.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/memutils.h"
 #include "utils/ps_status.h"
+#include "utils/rel.h"
 #include "utils/relmapper.h"
 #include "utils/tqual.h"
 
@@ -64,6 +62,8 @@ static void cleanup(void);
  *		global variables
  * ----------------
  */
+
+AuxProcType	MyAuxProcType = NotAnAuxProcess;	/* declared in miscadmin.h */
 
 Relation	boot_reldesc;		/* current relation descriptor */
 
@@ -189,7 +189,6 @@ AuxiliaryProcessMain(int argc, char *argv[])
 {
 	char	   *progname = argv[0];
 	int			flag;
-	AuxProcType auxType = CheckerProcess;
 	char	   *userDoption = NULL;
 
 	/*
@@ -230,6 +229,9 @@ AuxiliaryProcessMain(int argc, char *argv[])
 		argc--;
 	}
 
+	/* If no -x argument, we are a CheckerProcess */
+	MyAuxProcType = CheckerProcess;
+
 	while ((flag = getopt(argc, argv, "B:c:d:D:Fr:x:-:")) != -1)
 	{
 		switch (flag)
@@ -260,7 +262,7 @@ AuxiliaryProcessMain(int argc, char *argv[])
 				strlcpy(OutputFileName, optarg, MAXPGPATH);
 				break;
 			case 'x':
-				auxType = atoi(optarg);
+				MyAuxProcType = atoi(optarg);
 				break;
 			case 'c':
 			case '-':
@@ -310,13 +312,16 @@ AuxiliaryProcessMain(int argc, char *argv[])
 	{
 		const char *statmsg;
 
-		switch (auxType)
+		switch (MyAuxProcType)
 		{
 			case StartupProcess:
 				statmsg = "startup process";
 				break;
 			case BgWriterProcess:
 				statmsg = "writer process";
+				break;
+			case CheckpointerProcess:
+				statmsg = "checkpointer process";
 				break;
 			case WalWriterProcess:
 				statmsg = "wal writer process";
@@ -336,10 +341,6 @@ AuxiliaryProcessMain(int argc, char *argv[])
 	{
 		if (!SelectConfigFiles(userDoption, progname))
 			proc_exit(1);
-		/* If timezone is not set, determine what the OS uses */
-		pg_timezone_initialize();
-		/* If timezone_abbreviations is not set, select default */
-		pg_timezone_abbrev_initialize();
 	}
 
 	/* Validate we have been given a reasonable-looking DataDir */
@@ -377,15 +378,15 @@ AuxiliaryProcessMain(int argc, char *argv[])
 		/*
 		 * Assign the ProcSignalSlot for an auxiliary process.	Since it
 		 * doesn't have a BackendId, the slot is statically allocated based on
-		 * the auxiliary process type (auxType).  Backends use slots indexed
-		 * in the range from 1 to MaxBackends (inclusive), so we use
+		 * the auxiliary process type (MyAuxProcType).  Backends use slots
+		 * indexed in the range from 1 to MaxBackends (inclusive), so we use
 		 * MaxBackends + AuxProcType + 1 as the index of the slot for an
 		 * auxiliary process.
 		 *
 		 * This will need rethinking if we ever want more than one of a
 		 * particular auxiliary process type.
 		 */
-		ProcSignalInit(MaxBackends + auxType + 1);
+		ProcSignalInit(MaxBackends + MyAuxProcType + 1);
 
 		/* finish setting up bufmgr.c */
 		InitBufferPoolBackend();
@@ -399,7 +400,7 @@ AuxiliaryProcessMain(int argc, char *argv[])
 	 */
 	SetProcessingMode(NormalProcessing);
 
-	switch (auxType)
+	switch (MyAuxProcType)
 	{
 		case CheckerProcess:
 			/* don't set signals, they're useless here */
@@ -422,6 +423,11 @@ AuxiliaryProcessMain(int argc, char *argv[])
 			BackgroundWriterMain();
 			proc_exit(1);		/* should never return */
 
+		case CheckpointerProcess:
+			/* don't set signals, checkpointer has its own agenda */
+			CheckpointerMain();
+			proc_exit(1);		/* should never return */
+
 		case WalWriterProcess:
 			/* don't set signals, walwriter has its own agenda */
 			InitXLOGAccess();
@@ -434,7 +440,7 @@ AuxiliaryProcessMain(int argc, char *argv[])
 			proc_exit(1);		/* should never return */
 
 		default:
-			elog(PANIC, "unrecognized process type: %d", auxType);
+			elog(PANIC, "unrecognized process type: %d", (int) MyAuxProcType);
 			proc_exit(1);
 	}
 }
@@ -820,7 +826,7 @@ InsertOneValue(char *value, int i)
 	Oid			typoutput;
 	char	   *prt;
 
-	AssertArg(i >= 0 || i < MAXATTR);
+	AssertArg(i >= 0 && i < MAXATTR);
 
 	elog(DEBUG4, "inserting column %d value \"%s\"", i, value);
 
@@ -845,7 +851,7 @@ void
 InsertOneNull(int i)
 {
 	elog(DEBUG4, "inserting column %d NULL", i);
-	Assert(i >= 0 || i < MAXATTR);
+	Assert(i >= 0 && i < MAXATTR);
 	values[i] = PointerGetDatum(NULL);
 	Nulls[i] = true;
 }

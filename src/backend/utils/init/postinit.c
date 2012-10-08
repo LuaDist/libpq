@@ -3,7 +3,7 @@
  * postinit.c
  *	  postgres initialization utilities
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -574,6 +574,15 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 		/* statement_timestamp must be set for timeouts to work correctly */
 		SetCurrentStatementStartTimestamp();
 		StartTransactionCommand();
+
+		/*
+		 * transaction_isolation will have been set to the default by the
+		 * above.  If the default is "serializable", and we are in hot
+		 * standby, we will fail if we don't change it to something lower.
+		 * Fortunately, "read committed" is plenty good enough.
+		 */
+		XactIsoLevel = XACT_READ_COMMITTED;
+
 		(void) GetTransactionSnapshot();
 	}
 
@@ -659,11 +668,10 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 	{
 		Assert(!bootstrap);
 
-		/* must have authenticated as a replication role */
-		if (!is_authenticated_user_replication_role())
+		if (!superuser() && !is_authenticated_user_replication_role())
 			ereport(FATAL,
 					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-					 errmsg("must be replication role to start walsender")));
+					 errmsg("must be superuser or replication role to start walsender")));
 
 		/* process any options passed in the startup packet */
 		if (MyProcPort != NULL)

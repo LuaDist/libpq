@@ -35,6 +35,7 @@ SUBDIRS = \
 		pg_standby	\
 		pg_stat_statements \
 		pg_test_fsync	\
+		pg_test_timing	\
 		pg_trgm		\
 		pg_upgrade	\
 		pg_upgrade_support \
@@ -45,6 +46,7 @@ SUBDIRS = \
 		seg		\
 		spi		\
 		tablefunc	\
+		tcn		\
 		test_parser	\
 		tsearch2	\
 		unaccent	\

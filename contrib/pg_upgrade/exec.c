@@ -3,57 +3,137 @@
  *
  *	execution functions
  *
- *	Copyright (c) 2010-2011, PostgreSQL Global Development Group
+ *	Copyright (c) 2010-2012, PostgreSQL Global Development Group
  *	contrib/pg_upgrade/exec.c
  */
+
+#include "postgres.h"
 
 #include "pg_upgrade.h"
 
 #include <fcntl.h>
 #include <unistd.h>
-
+#include <sys/types.h>
 
 static void check_data_dir(const char *pg_data);
 static void check_bin_dir(ClusterInfo *cluster);
 static void validate_exec(const char *dir, const char *cmdName);
+
 #ifdef WIN32
-static int win32_check_directory_write_permissions(void);
+static int	win32_check_directory_write_permissions(void);
 #endif
 
 
 /*
  * exec_prog()
+ *		Execute an external program with stdout/stderr redirected, and report
+ *		errors
  *
- *	Formats a command from the given argument list and executes that
- *	command.  If the command executes, exec_prog() returns 1 otherwise
- *	exec_prog() logs an error message and returns 0.
+ * Formats a command from the given argument list, logs it to the log file,
+ * and attempts to execute that command.  If the command executes
+ * successfully, exec_prog() returns true.
  *
- *	If throw_error is TRUE, this function will throw a PG_FATAL error
- *	instead of returning should an error occur.
+ * If the command fails, an error message is saved to the specified log_file.
+ * If throw_error is true, this raises a PG_FATAL error and pg_upgrade
+ * terminates; otherwise it is just reported as PG_REPORT and exec_prog()
+ * returns false.
  */
-int
-exec_prog(bool throw_error, const char *fmt,...)
+bool
+exec_prog(const char *log_file, const char *opt_log_file,
+		  bool throw_error, const char *fmt,...)
 {
-	va_list		args;
 	int			result;
-	char		cmd[MAXPGPATH];
+	int			written;
+#define MAXCMDLEN (2 * MAXPGPATH)
+	char		cmd[MAXCMDLEN];
+	mode_t		old_umask = 0;
+	FILE	   *log;
+	va_list		ap;
 
-	va_start(args, fmt);
-	vsnprintf(cmd, MAXPGPATH, fmt, args);
-	va_end(args);
+	old_umask = umask(S_IRWXG | S_IRWXO);
 
-	pg_log(PG_INFO, "%s\n", cmd);
+	written = strlcpy(cmd, SYSTEMQUOTE, sizeof(cmd));
+	va_start(ap, fmt);
+	written += vsnprintf(cmd + written, MAXCMDLEN - written, fmt, ap);
+	va_end(ap);
+	if (written >= MAXCMDLEN)
+		pg_log(PG_FATAL, "command too long\n");
+	written += snprintf(cmd + written, MAXCMDLEN - written,
+						" >> \"%s\" 2>&1" SYSTEMQUOTE, log_file);
+	if (written >= MAXCMDLEN)
+		pg_log(PG_FATAL, "command too long\n");
+
+	log = fopen_priv(log_file, "a");
+
+#ifdef WIN32
+	{
+		/* 
+		 * "pg_ctl -w stop" might have reported that the server has
+		 * stopped because the postmaster.pid file has been removed,
+		 * but "pg_ctl -w start" might still be in the process of
+		 * closing and might still be holding its stdout and -l log
+		 * file descriptors open.  Therefore, try to open the log 
+		 * file a few more times.
+		 */
+		int iter;
+		for (iter = 0; iter < 4 && log == NULL; iter++)
+		{
+			sleep(1);
+			log = fopen_priv(log_file, "a");
+		}
+	}
+#endif
+
+	if (log == NULL)
+		pg_log(PG_FATAL, "cannot write to log file %s\n", log_file);
+#ifdef WIN32
+	fprintf(log, "\n\n");
+#endif
+	pg_log(PG_VERBOSE, "%s\n", cmd);
+	fprintf(log, "command: %s\n", cmd);
+
+	/*
+	 * In Windows, we must close the log file at this point so the file is not
+	 * open while the command is running, or we get a share violation.
+	 */
+	fclose(log);
 
 	result = system(cmd);
 
+	umask(old_umask);
+
 	if (result != 0)
 	{
-		pg_log(throw_error ? PG_FATAL : PG_INFO,
-			   "There were problems executing %s\n", cmd);
-		return 1;
+		report_status(PG_REPORT, "*failure*");
+		fflush(stdout);
+		pg_log(PG_VERBOSE, "There were problems executing \"%s\"\n", cmd);
+		if (opt_log_file)
+			pg_log(throw_error ? PG_FATAL : PG_REPORT,
+				   "Consult the last few lines of \"%s\" or \"%s\" for\n"
+				   "the probable cause of the failure.\n",
+				   log_file, opt_log_file);
+		else
+			pg_log(throw_error ? PG_FATAL : PG_REPORT,
+				   "Consult the last few lines of \"%s\" for\n"
+				   "the probable cause of the failure.\n",
+				   log_file);
 	}
 
-	return 0;
+#ifndef WIN32
+	/* 
+	 *	We can't do this on Windows because it will keep the "pg_ctl start"
+	 *	output filename open until the server stops, so we do the \n\n above
+	 *	on that platform.  We use a unique filename for "pg_ctl start" that is
+	 *	never reused while the server is running, so it works fine.  We could
+	 *	log these commands to a third file, but that just adds complexity.
+	 */
+	if ((log = fopen_priv(log_file, "a")) == NULL)
+		pg_log(PG_FATAL, "cannot write to log file %s\n", log_file);
+	fprintf(log, "\n\n");
+	fclose(log);
+#endif
+
+	return result == 0;
 }
 
 
@@ -75,8 +155,8 @@ is_server_running(const char *datadir)
 	{
 		/* ENOTDIR means we will throw a more useful error later */
 		if (errno != ENOENT && errno != ENOTDIR)
-			pg_log(PG_FATAL, "could not open file \"%s\" for reading\n",
-				   path);
+			pg_log(PG_FATAL, "could not open file \"%s\" for reading: %s\n",
+				   path, getErrorText(errno));
 
 		return false;
 	}
@@ -127,12 +207,12 @@ verify_directories(void)
 static int
 win32_check_directory_write_permissions(void)
 {
-	int fd;
+	int			fd;
 
 	/*
-	 *	We open a file we would normally create anyway.  We do this even in
-	 *	'check' mode, which isn't ideal, but this is the best we can do.
-	 */	
+	 * We open a file we would normally create anyway.	We do this even in
+	 * 'check' mode, which isn't ideal, but this is the best we can do.
+	 */
 	if ((fd = open(GLOBALS_DUMP_FILE, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR)) < 0)
 		return -1;
 	close(fd);
@@ -169,12 +249,12 @@ check_data_dir(const char *pg_data)
 		struct stat statBuf;
 
 		snprintf(subDirName, sizeof(subDirName), "%s%s%s", pg_data,
-			/* Win32 can't stat() a directory with a trailing slash. */
+		/* Win32 can't stat() a directory with a trailing slash. */
 				 *requiredSubdirs[subdirnum] ? "/" : "",
 				 requiredSubdirs[subdirnum]);
 
 		if (stat(subDirName, &statBuf) != 0)
-			report_status(PG_FATAL, "check for %s failed:  %s\n",
+			report_status(PG_FATAL, "check for \"%s\" failed: %s\n",
 						  subDirName, getErrorText(errno));
 		else if (!S_ISDIR(statBuf.st_mode))
 			report_status(PG_FATAL, "%s is not a directory\n",
@@ -198,7 +278,7 @@ check_bin_dir(ClusterInfo *cluster)
 
 	/* check bindir */
 	if (stat(cluster->bindir, &statBuf) != 0)
-		report_status(PG_FATAL, "check for %s failed:  %s\n",
+		report_status(PG_FATAL, "check for \"%s\" failed: %s\n",
 					  cluster->bindir, getErrorText(errno));
 	else if (!S_ISDIR(statBuf.st_mode))
 		report_status(PG_FATAL, "%s is not a directory\n",
@@ -210,7 +290,6 @@ check_bin_dir(ClusterInfo *cluster)
 	if (cluster == &new_cluster)
 	{
 		/* these are only needed in the new cluster */
-		validate_exec(cluster->bindir, "pg_config");
 		validate_exec(cluster->bindir, "psql");
 		validate_exec(cluster->bindir, "pg_dumpall");
 	}
@@ -241,10 +320,10 @@ validate_exec(const char *dir, const char *cmdName)
 	 * Ensure that the file exists and is a regular file.
 	 */
 	if (stat(path, &buf) < 0)
-		pg_log(PG_FATAL, "check for %s failed - %s\n",
+		pg_log(PG_FATAL, "check for \"%s\" failed: %s\n",
 			   path, getErrorText(errno));
 	else if (!S_ISREG(buf.st_mode))
-		pg_log(PG_FATAL, "check for %s failed - not an executable file\n",
+		pg_log(PG_FATAL, "check for \"%s\" failed: not an executable file\n",
 			   path);
 
 	/*
@@ -256,7 +335,7 @@ validate_exec(const char *dir, const char *cmdName)
 #else
 	if ((buf.st_mode & S_IRUSR) == 0)
 #endif
-		pg_log(PG_FATAL, "check for %s failed - cannot read file (permission denied)\n",
+		pg_log(PG_FATAL, "check for \"%s\" failed: cannot read file (permission denied)\n",
 			   path);
 
 #ifndef WIN32
@@ -264,6 +343,6 @@ validate_exec(const char *dir, const char *cmdName)
 #else
 	if ((buf.st_mode & S_IXUSR) == 0)
 #endif
-		pg_log(PG_FATAL, "check for %s failed - cannot execute (permission denied)\n",
+		pg_log(PG_FATAL, "check for \"%s\" failed: cannot execute (permission denied)\n",
 			   path);
 }

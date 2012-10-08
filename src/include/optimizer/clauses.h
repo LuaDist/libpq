@@ -4,7 +4,7 @@
  *	  prototypes for clauses.c.
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/optimizer/clauses.h
@@ -31,8 +31,8 @@ typedef struct
 extern Expr *make_opclause(Oid opno, Oid opresulttype, bool opretset,
 			  Expr *leftop, Expr *rightop,
 			  Oid opcollid, Oid inputcollid);
-extern Node *get_leftop(Expr *clause);
-extern Node *get_rightop(Expr *clause);
+extern Node *get_leftop(const Expr *clause);
+extern Node *get_rightop(const Expr *clause);
 
 extern bool not_clause(Node *clause);
 extern Expr *make_notclause(Expr *notclause);
@@ -55,12 +55,15 @@ extern bool contain_window_function(Node *clause);
 extern WindowFuncLists *find_window_functions(Node *clause, Index maxWinRef);
 
 extern double expression_returns_set_rows(Node *clause);
+extern double tlist_returns_set_rows(List *tlist);
 
 extern bool contain_subplans(Node *clause);
 
 extern bool contain_mutable_functions(Node *clause);
 extern bool contain_volatile_functions(Node *clause);
 extern bool contain_nonstrict_functions(Node *clause);
+extern bool contain_leaky_functions(Node *clause);
+
 extern Relids find_nonnullable_rels(Node *clause);
 extern List *find_nonnullable_vars(Node *clause);
 extern List *find_forced_null_vars(Node *clause);

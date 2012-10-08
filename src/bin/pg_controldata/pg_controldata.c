@@ -31,17 +31,11 @@ static void
 usage(const char *progname)
 {
 	printf(_("%s displays control information of a PostgreSQL database cluster.\n\n"), progname);
-	printf
-		(
-		 _(
-		   "Usage:\n"
-		   "  %s [OPTION] [DATADIR]\n\n"
-		   "Options:\n"
-		   "  --help         show this help, then exit\n"
-		   "  --version      output version information, then exit\n"
-		   ),
-		 progname
-		);
+	printf(_("Usage:\n"));
+	printf(_("  %s [OPTION] [DATADIR]\n"), progname);
+	printf(_("\nOptions:\n"));
+	printf(_("  -V, --version  output version information, then exit\n"));
+	printf(_("  -?, --help     show this help, then exit\n"));
 	printf(_("\nIf no data directory (DATADIR) is specified, "
 			 "the environment variable PGDATA\nis used.\n\n"));
 	printf(_("Report bugs to <pgsql-bugs@postgresql.org>.\n"));
@@ -209,6 +203,8 @@ main(int argc, char *argv[])
 		   ControlFile.checkPointCopy.redo.xrecoff);
 	printf(_("Latest checkpoint's TimeLineID:       %u\n"),
 		   ControlFile.checkPointCopy.ThisTimeLineID);
+	printf(_("Latest checkpoint's full_page_writes: %s\n"),
+		   ControlFile.checkPointCopy.fullPageWrites ? _("on") : _("off"));
 	printf(_("Latest checkpoint's NextXID:          %u/%u\n"),
 		   ControlFile.checkPointCopy.nextXidEpoch,
 		   ControlFile.checkPointCopy.nextXid);
@@ -232,6 +228,11 @@ main(int argc, char *argv[])
 	printf(_("Backup start location:                %X/%X\n"),
 		   ControlFile.backupStartPoint.xlogid,
 		   ControlFile.backupStartPoint.xrecoff);
+	printf(_("Backup end location:                  %X/%X\n"),
+		   ControlFile.backupEndPoint.xlogid,
+		   ControlFile.backupEndPoint.xrecoff);
+	printf(_("End-of-backup record required:        %s\n"),
+		   ControlFile.backupEndRequired ? _("yes") : _("no"));
 	printf(_("Current wal_level setting:            %s\n"),
 		   wal_level_str(ControlFile.wal_level));
 	printf(_("Current max_connections setting:      %d\n"),

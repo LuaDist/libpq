@@ -3,7 +3,7 @@
  * pg_aggregate.c
  *	  routines to support manipulation of the pg_aggregate relation
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -71,6 +71,7 @@ AggregateCreate(const char *aggName,
 	int			i;
 	ObjectAddress myself,
 				referenced;
+	AclResult	aclresult;
 
 	/* sanity checks (caller should have caught these) */
 	if (!aggName)
@@ -201,6 +202,25 @@ AggregateCreate(const char *aggName,
 	}
 
 	/*
+	 * permission checks on used types
+	 */
+	for (i = 0; i < numArgs; i++)
+	{
+		aclresult = pg_type_aclcheck(aggArgTypes[i], GetUserId(), ACL_USAGE);
+		if (aclresult != ACLCHECK_OK)
+			aclcheck_error_type(aclresult, aggArgTypes[i]);
+	}
+
+	aclresult = pg_type_aclcheck(aggTransType, GetUserId(), ACL_USAGE);
+	if (aclresult != ACLCHECK_OK)
+		aclcheck_error_type(aclresult, aggTransType);
+
+	aclresult = pg_type_aclcheck(finaltype, GetUserId(), ACL_USAGE);
+	if (aclresult != ACLCHECK_OK)
+		aclcheck_error_type(aclresult, finaltype);
+
+
+	/*
 	 * Everything looks okay.  Try to create the pg_proc entry for the
 	 * aggregate.  (This could fail if there's already a conflicting entry.)
 	 */
@@ -210,6 +230,7 @@ AggregateCreate(const char *aggName,
 							  false,	/* no replacement */
 							  false,	/* doesn't return a set */
 							  finaltype,		/* returnType */
+							  GetUserId(),		/* proowner */
 							  INTERNALlanguageId,		/* languageObjectId */
 							  InvalidOid,		/* no validator */
 							  "aggregate_dummy",		/* placeholder proc */
@@ -218,6 +239,7 @@ AggregateCreate(const char *aggName,
 							  false,	/* isWindowFunc */
 							  false,	/* security invoker (currently not
 										 * definable for agg) */
+							  false,	/* isLeakProof */
 							  false,	/* isStrict (not needed for agg) */
 							  PROVOLATILE_IMMUTABLE,	/* volatility (not
 														 * needed for agg) */

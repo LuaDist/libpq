@@ -4,7 +4,7 @@
  *	  utilities routines for the postgres GiST index access method.
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -17,14 +17,12 @@
 
 #include "access/gist_private.h"
 #include "access/reloptions.h"
-#include "storage/freespace.h"
 #include "storage/indexfsm.h"
 #include "storage/lmgr.h"
-#include "storage/bufmgr.h"
-#include "utils/rel.h"
+#include "utils/builtins.h"
 
 /*
- * static *S used for temrorary storage (saves stack and palloc() call)
+ * static *S used for temporary storage (saves stack and palloc() call)
  */
 
 static Datum attrS[INDEX_MAX_KEYS];
@@ -150,8 +148,8 @@ gistfillitupvec(IndexTuple *vec, int veclen, int *memlen)
 }
 
 /*
- * Make unions of keys in IndexTuple vector, return FALSE if itvec contains
- * invalid tuple. Resulting Datums aren't compressed.
+ * Make unions of keys in IndexTuple vector.
+ * Resulting Datums aren't compressed.
  */
 
 void
@@ -365,72 +363,120 @@ gistgetadjusted(Relation r, IndexTuple oldtup, IndexTuple addtup, GISTSTATE *gis
 }
 
 /*
- * find entry with lowest penalty
+ * Search an upper index page for the entry with lowest penalty for insertion
+ * of the new index key contained in "it".
+ *
+ * Returns the index of the page entry to insert into.
  */
 OffsetNumber
 gistchoose(Relation r, Page p, IndexTuple it,	/* it has compressed entry */
 		   GISTSTATE *giststate)
 {
+	OffsetNumber result;
 	OffsetNumber maxoff;
 	OffsetNumber i;
-	OffsetNumber which;
-	float		sum_grow,
-				which_grow[INDEX_MAX_KEYS];
+	float		best_penalty[INDEX_MAX_KEYS];
 	GISTENTRY	entry,
 				identry[INDEX_MAX_KEYS];
 	bool		isnull[INDEX_MAX_KEYS];
 
-	maxoff = PageGetMaxOffsetNumber(p);
-	*which_grow = -1.0;
-	which = InvalidOffsetNumber;
-	sum_grow = 1;
+	Assert(!GistPageIsLeaf(p));
+
 	gistDeCompressAtt(giststate, r,
 					  it, NULL, (OffsetNumber) 0,
 					  identry, isnull);
 
+	/* we'll return FirstOffsetNumber if page is empty (shouldn't happen) */
+	result = FirstOffsetNumber;
+
+	/*
+	 * The index may have multiple columns, and there's a penalty value for
+	 * each column.  The penalty associated with a column that appears earlier
+	 * in the index definition is strictly more important than the penalty of
+	 * a column that appears later in the index definition.
+	 *
+	 * best_penalty[j] is the best penalty we have seen so far for column j,
+	 * or -1 when we haven't yet examined column j.  Array entries to the
+	 * right of the first -1 are undefined.
+	 */
+	best_penalty[0] = -1;
+
+	/*
+	 * Loop over tuples on page.
+	 */
+	maxoff = PageGetMaxOffsetNumber(p);
 	Assert(maxoff >= FirstOffsetNumber);
-	Assert(!GistPageIsLeaf(p));
 
-	for (i = FirstOffsetNumber; i <= maxoff && sum_grow; i = OffsetNumberNext(i))
+	for (i = FirstOffsetNumber; i <= maxoff; i = OffsetNumberNext(i))
 	{
-		int			j;
 		IndexTuple	itup = (IndexTuple) PageGetItem(p, PageGetItemId(p, i));
+		bool		zero_penalty;
+		int			j;
 
-		sum_grow = 0;
+		zero_penalty = true;
+
+		/* Loop over index attributes. */
 		for (j = 0; j < r->rd_att->natts; j++)
 		{
 			Datum		datum;
 			float		usize;
 			bool		IsNull;
 
+			/* Compute penalty for this column. */
 			datum = index_getattr(itup, j + 1, giststate->tupdesc, &IsNull);
 			gistdentryinit(giststate, j, &entry, datum, r, p, i,
 						   FALSE, IsNull);
 			usize = gistpenalty(giststate, j, &entry, IsNull,
 								&identry[j], isnull[j]);
+			if (usize > 0)
+				zero_penalty = false;
 
-			if (which_grow[j] < 0 || usize < which_grow[j])
+			if (best_penalty[j] < 0 || usize < best_penalty[j])
 			{
-				which = i;
-				which_grow[j] = usize;
-				if (j < r->rd_att->natts - 1 && i == FirstOffsetNumber)
-					which_grow[j + 1] = -1;
-				sum_grow += which_grow[j];
+				/*
+				 * New best penalty for column.  Tentatively select this tuple
+				 * as the target, and record the best penalty.	Then reset the
+				 * next column's penalty to "unknown" (and indirectly, the
+				 * same for all the ones to its right).  This will force us to
+				 * adopt this tuple's penalty values as the best for all the
+				 * remaining columns during subsequent loop iterations.
+				 */
+				result = i;
+				best_penalty[j] = usize;
+
+				if (j < r->rd_att->natts - 1)
+					best_penalty[j + 1] = -1;
 			}
-			else if (which_grow[j] == usize)
-				sum_grow += usize;
+			else if (best_penalty[j] == usize)
+			{
+				/*
+				 * The current tuple is exactly as good for this column as the
+				 * best tuple seen so far.	The next iteration of this loop
+				 * will compare the next column.
+				 */
+			}
 			else
 			{
-				sum_grow = 1;
+				/*
+				 * The current tuple is worse for this column than the best
+				 * tuple seen so far.  Skip the remaining columns and move on
+				 * to the next tuple, if any.
+				 */
+				zero_penalty = false;	/* so outer loop won't exit */
 				break;
 			}
 		}
+
+		/*
+		 * If we find a tuple with zero penalty for all columns, there's no
+		 * need to examine remaining tuples; just break out of the loop and
+		 * return it.
+		 */
+		if (zero_penalty)
+			break;
 	}
 
-	if (which == InvalidOffsetNumber)
-		which = FirstOffsetNumber;
-
-	return which;
+	return result;
 }
 
 /*
@@ -541,8 +587,10 @@ gistpenalty(GISTSTATE *giststate, int attno,
 	else if (isNullOrig && isNullAdd)
 		penalty = 0.0;
 	else
-		penalty = 1e10;			/* try to prevent mixing null and non-null
-								 * values */
+	{
+		/* try to prevent mixing null and non-null values */
+		penalty = get_float4_infinity();
+	}
 
 	return penalty;
 }
@@ -670,13 +718,30 @@ gistoptions(PG_FUNCTION_ARGS)
 {
 	Datum		reloptions = PG_GETARG_DATUM(0);
 	bool		validate = PG_GETARG_BOOL(1);
-	bytea	   *result;
+	relopt_value *options;
+	GiSTOptions *rdopts;
+	int			numoptions;
+	static const relopt_parse_elt tab[] = {
+		{"fillfactor", RELOPT_TYPE_INT, offsetof(GiSTOptions, fillfactor)},
+		{"buffering", RELOPT_TYPE_STRING, offsetof(GiSTOptions, bufferingModeOffset)}
+	};
 
-	result = default_reloptions(reloptions, validate, RELOPT_KIND_GIST);
+	options = parseRelOptions(reloptions, validate, RELOPT_KIND_GIST,
+							  &numoptions);
 
-	if (result)
-		PG_RETURN_BYTEA_P(result);
-	PG_RETURN_NULL();
+	/* if none set, we're done */
+	if (numoptions == 0)
+		PG_RETURN_NULL();
+
+	rdopts = allocateReloptStruct(sizeof(GiSTOptions), options, numoptions);
+
+	fillRelOptions((void *) rdopts, sizeof(GiSTOptions), options, numoptions,
+				   validate, tab, lengthof(tab));
+
+	pfree(options);
+
+	PG_RETURN_BYTEA_P(rdopts);
+
 }
 
 /*

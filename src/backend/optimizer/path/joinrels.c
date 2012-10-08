@@ -3,7 +3,7 @@
  * joinrels.c
  *	  Routines to determine which relations should be joined
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -65,37 +65,34 @@ join_search_one_level(PlannerInfo *root, int level)
 	 * We prefer to join using join clauses, but if we find a rel of level-1
 	 * members that has no join clauses, we will generate Cartesian-product
 	 * joins against all initial rels not already contained in it.
-	 *
-	 * In the first pass (level == 2), we try to join each initial rel to each
-	 * initial rel that appears later in joinrels[1].  (The mirror-image joins
-	 * are handled automatically by make_join_rel.)  In later passes, we try
-	 * to join rels of size level-1 from joinrels[level-1] to each initial rel
-	 * in joinrels[1].
 	 */
 	foreach(r, joinrels[level - 1])
 	{
 		RelOptInfo *old_rel = (RelOptInfo *) lfirst(r);
-		ListCell   *other_rels;
-
-		if (level == 2)
-			other_rels = lnext(r);		/* only consider remaining initial
-										 * rels */
-		else
-			other_rels = list_head(joinrels[1]);		/* consider all initial
-														 * rels */
 
 		if (old_rel->joininfo != NIL || old_rel->has_eclass_joins ||
 			has_join_restriction(root, old_rel))
 		{
 			/*
-			 * Note that if all available join clauses for this rel require
-			 * more than one other rel, we will fail to make any joins against
-			 * it here.  In most cases that's OK; it'll be considered by
-			 * "bushy plan" join code in a higher-level pass where we have
-			 * those other rels collected into a join rel.
+			 * There are join clauses or join order restrictions relevant to
+			 * this rel, so consider joins between this rel and (only) those
+			 * initial rels it is linked to by a clause or restriction.
 			 *
-			 * See also the last-ditch case below.
+			 * At level 2 this condition is symmetric, so there is no need to
+			 * look at initial rels before this one in the list; we already
+			 * considered such joins when we were at the earlier rel.  (The
+			 * mirror-image joins are handled automatically by make_join_rel.)
+			 * In later passes (level > 2), we join rels of the previous level
+			 * to each initial rel they don't already include but have a join
+			 * clause or restriction with.
 			 */
+			ListCell   *other_rels;
+
+			if (level == 2)		/* consider remaining initial rels */
+				other_rels = lnext(r);
+			else	/* consider all initial rels */
+				other_rels = list_head(joinrels[1]);
+
 			make_rels_by_clause_joins(root,
 									  old_rel,
 									  other_rels);
@@ -106,10 +103,17 @@ join_search_one_level(PlannerInfo *root, int level)
 			 * Oops, we have a relation that is not joined to any other
 			 * relation, either directly or by join-order restrictions.
 			 * Cartesian product time.
+			 *
+			 * We consider a cartesian product with each not-already-included
+			 * initial rel, whether it has other join clauses or not.  At
+			 * level 2, if there are two or more clauseless initial rels, we
+			 * will redundantly consider joining them in both directions; but
+			 * such cases aren't common enough to justify adding complexity to
+			 * avoid the duplicated effort.
 			 */
 			make_rels_by_clauseless_joins(root,
 										  old_rel,
-										  other_rels);
+										  list_head(joinrels[1]));
 		}
 	}
 
@@ -139,7 +143,7 @@ join_search_one_level(PlannerInfo *root, int level)
 			ListCell   *r2;
 
 			/*
-			 * We can ignore clauseless joins here, *except* when they
+			 * We can ignore relations without join clauses here, unless they
 			 * participate in join-order restrictions --- then we might have
 			 * to force a bushy join plan.
 			 */
@@ -160,8 +164,8 @@ join_search_one_level(PlannerInfo *root, int level)
 				{
 					/*
 					 * OK, we can build a rel of the right level from this
-					 * pair of rels.  Do so if there is at least one usable
-					 * join clause or a relevant join restriction.
+					 * pair of rels.  Do so if there is at least one relevant
+					 * join clause or join order restriction.
 					 */
 					if (have_relevant_joinclause(root, old_rel, new_rel) ||
 						have_join_order_restriction(root, old_rel, new_rel))
@@ -173,17 +177,24 @@ join_search_one_level(PlannerInfo *root, int level)
 		}
 	}
 
-	/*
+	/*----------
 	 * Last-ditch effort: if we failed to find any usable joins so far, force
 	 * a set of cartesian-product joins to be generated.  This handles the
 	 * special case where all the available rels have join clauses but we
-	 * cannot use any of those clauses yet.  An example is
+	 * cannot use any of those clauses yet.  This can only happen when we are
+	 * considering a join sub-problem (a sub-joinlist) and all the rels in the
+	 * sub-problem have only join clauses with rels outside the sub-problem.
+	 * An example is
 	 *
-	 * SELECT * FROM a,b,c WHERE (a.f1 + b.f2 + c.f3) = 0;
+	 *		SELECT ... FROM a INNER JOIN b ON TRUE, c, d, ...
+	 *		WHERE a.w = c.x and b.y = d.z;
 	 *
-	 * The join clause will be usable at level 3, but at level 2 we have no
-	 * choice but to make cartesian joins.	We consider only left-sided and
-	 * right-sided cartesian joins in this case (no bushy).
+	 * If the "a INNER JOIN b" sub-problem does not get flattened into the
+	 * upper level, we must be willing to make a cartesian join of a and b;
+	 * but the code above will not have done so, because it thought that both
+	 * a and b have joinclauses.  We consider only left-sided and right-sided
+	 * cartesian joins in this case (no bushy).
+	 *----------
 	 */
 	if (joinrels[level] == NIL)
 	{
@@ -194,18 +205,10 @@ join_search_one_level(PlannerInfo *root, int level)
 		foreach(r, joinrels[level - 1])
 		{
 			RelOptInfo *old_rel = (RelOptInfo *) lfirst(r);
-			ListCell   *other_rels;
-
-			if (level == 2)
-				other_rels = lnext(r);	/* only consider remaining initial
-										 * rels */
-			else
-				other_rels = list_head(joinrels[1]);	/* consider all initial
-														 * rels */
 
 			make_rels_by_clauseless_joins(root,
 										  old_rel,
-										  other_rels);
+										  list_head(joinrels[1]));
 		}
 
 		/*----------
@@ -935,14 +938,11 @@ has_legal_joinclause(PlannerInfo *root, RelOptInfo *rel)
 
 /*
  * is_dummy_rel --- has relation been proven empty?
- *
- * If so, it will have a single path that is dummy.
  */
 static bool
 is_dummy_rel(RelOptInfo *rel)
 {
-	return (rel->cheapest_total_path != NULL &&
-			IS_DUMMY_PATH(rel->cheapest_total_path));
+	return IS_DUMMY_REL(rel);
 }
 
 /*
@@ -979,9 +979,9 @@ mark_dummy_rel(RelOptInfo *rel)
 	rel->pathlist = NIL;
 
 	/* Set up the dummy path */
-	add_path(rel, (Path *) create_append_path(rel, NIL));
+	add_path(rel, (Path *) create_append_path(rel, NIL, NULL));
 
-	/* Set or update cheapest_total_path */
+	/* Set or update cheapest_total_path and related fields */
 	set_cheapest(rel);
 
 	MemoryContextSwitchTo(oldcontext);

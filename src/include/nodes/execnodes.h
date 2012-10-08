@@ -4,7 +4,7 @@
  *	  definitions for executor state nodes
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/nodes/execnodes.h
@@ -16,13 +16,11 @@
 
 #include "access/genam.h"
 #include "access/heapam.h"
-#include "access/skey.h"
+#include "executor/instrument.h"
 #include "nodes/params.h"
 #include "nodes/plannodes.h"
-#include "nodes/tidbitmap.h"
-#include "utils/hsearch.h"
-#include "utils/rel.h"
-#include "utils/snapshot.h"
+#include "utils/reltrigger.h"
+#include "utils/sortsupport.h"
 #include "utils/tuplestore.h"
 
 
@@ -318,7 +316,7 @@ typedef struct ResultRelInfo
 	TriggerDesc *ri_TrigDesc;
 	FmgrInfo   *ri_TrigFunctions;
 	List	  **ri_TrigWhenExprs;
-	struct Instrumentation *ri_TrigInstrument;
+	Instrumentation *ri_TrigInstrument;
 	List	  **ri_ConstraintExprs;
 	JunkFilter *ri_junkFilter;
 	ProjectionInfo *ri_projectReturning;
@@ -355,6 +353,7 @@ typedef struct EState
 	List	   *es_trig_target_relations;		/* trigger-only ResultRelInfos */
 	TupleTableSlot *es_trig_tuple_slot; /* for trigger output tuples */
 	TupleTableSlot *es_trig_oldtup_slot;		/* for TriggerEnabled */
+	TupleTableSlot *es_trig_newtup_slot;		/* for TriggerEnabled */
 
 	/* Parameter info: */
 	ParamListInfo es_param_list_info;	/* values of external params */
@@ -372,8 +371,6 @@ typedef struct EState
 
 	int			es_top_eflags;	/* eflags passed to ExecutorStart */
 	int			es_instrument;	/* OR of InstrumentOption flags */
-	bool		es_select_into; /* true if doing SELECT INTO */
-	bool		es_into_oids;	/* true to generate OIDs in SELECT INTO */
 	bool		es_finished;	/* true when ExecutorFinish is done */
 
 	List	   *es_exprcontexts;	/* List of ExprContexts within EState */
@@ -401,12 +398,6 @@ typedef struct EState
 	HeapTuple  *es_epqTuple;	/* array of EPQ substitute tuples */
 	bool	   *es_epqTupleSet; /* true if EPQ tuple is provided */
 	bool	   *es_epqScanDone; /* true if EPQ tuple has been fetched */
-
-	/*
-	 * this field added at end of struct to avoid post-release ABI breakage in
-	 * existing release branches.  It'll be in a more logical place in 9.2.
-	 */
-	TupleTableSlot *es_trig_newtup_slot;		/* for TriggerEnabled */
 } EState;
 
 
@@ -570,6 +561,17 @@ typedef struct GenericExprState
 } GenericExprState;
 
 /* ----------------
+ *		WholeRowVarExprState node
+ * ----------------
+ */
+typedef struct WholeRowVarExprState
+{
+	ExprState	xprstate;
+	struct PlanState *parent;	/* parent PlanState, or NULL if none */
+	JunkFilter *wrv_junkFilter; /* JunkFilter to remove resjunk cols */
+} WholeRowVarExprState;
+
+/* ----------------
  *		AggrefExprState node
  * ----------------
  */
@@ -717,6 +719,7 @@ typedef struct SubPlanState
 	ExprState  *testexpr;		/* state of combining expression */
 	List	   *args;			/* states of argument expression(s) */
 	HeapTuple	curTuple;		/* copy of most recent tuple from subplan */
+	Datum		curArray;		/* most recent array from ARRAY() subplan */
 	/* these are used when hashing the subselect's output: */
 	ProjectionInfo *projLeft;	/* for projecting lefthand exprs */
 	ProjectionInfo *projRight;	/* for projecting subselect output */
@@ -976,8 +979,7 @@ typedef struct PlanState
 								 * nodes point to one EState for the whole
 								 * top-level plan */
 
-	struct Instrumentation *instrument; /* Optional runtime stats for this
-										 * plan node */
+	Instrumentation *instrument;	/* Optional runtime stats for this node */
 
 	/*
 	 * Common structural data for all Plan types.  These links to subsidiary
@@ -1016,6 +1018,18 @@ typedef struct PlanState
  */
 #define innerPlanState(node)		(((PlanState *)(node))->righttree)
 #define outerPlanState(node)		(((PlanState *)(node))->lefttree)
+
+/* Macros for inline access to certain instrumentation counters */
+#define InstrCountFiltered1(node, delta) \
+	do { \
+		if (((PlanState *)(node))->instrument) \
+			((PlanState *)(node))->instrument->nfiltered1 += (delta); \
+	} while(0)
+#define InstrCountFiltered2(node, delta) \
+	do { \
+		if (((PlanState *)(node))->instrument) \
+			((PlanState *)(node))->instrument->nfiltered2 += (delta); \
+	} while(0)
 
 /*
  * EPQState is state for executing an EvalPlanQual recheck on a candidate
@@ -1084,7 +1098,7 @@ typedef struct AppendState
  *
  *		nplans			how many plans are in the array
  *		nkeys			number of sort key columns
- *		scankeys		sort keys in ScanKey representation
+ *		sortkeys		sort keys in SortSupport representation
  *		slots			current output tuple of each subplan
  *		heap			heap of active tuples (represented as array indexes)
  *		heap_size		number of active heap entries
@@ -1098,7 +1112,7 @@ typedef struct MergeAppendState
 	PlanState **mergeplans;		/* array of PlanStates for my inputs */
 	int			ms_nplans;
 	int			ms_nkeys;
-	ScanKey		ms_scankeys;	/* array of length ms_nkeys */
+	SortSupport ms_sortkeys;	/* array of length ms_nkeys */
 	TupleTableSlot **ms_slots;	/* array of length ms_nplans */
 	int		   *ms_heap;		/* array of length ms_nplans */
 	int			ms_heap_size;	/* current active length of ms_heap[] */
@@ -1240,6 +1254,42 @@ typedef struct IndexScanState
 	Relation	iss_RelationDesc;
 	IndexScanDesc iss_ScanDesc;
 } IndexScanState;
+
+/* ----------------
+ *	 IndexOnlyScanState information
+ *
+ *		indexqual		   execution state for indexqual expressions
+ *		ScanKeys		   Skey structures for index quals
+ *		NumScanKeys		   number of ScanKeys
+ *		OrderByKeys		   Skey structures for index ordering operators
+ *		NumOrderByKeys	   number of OrderByKeys
+ *		RuntimeKeys		   info about Skeys that must be evaluated at runtime
+ *		NumRuntimeKeys	   number of RuntimeKeys
+ *		RuntimeKeysReady   true if runtime Skeys have been computed
+ *		RuntimeContext	   expr context for evaling runtime Skeys
+ *		RelationDesc	   index relation descriptor
+ *		ScanDesc		   index scan descriptor
+ *		VMBuffer		   buffer in use for visibility map testing, if any
+ *		HeapFetches		   number of tuples we were forced to fetch from heap
+ * ----------------
+ */
+typedef struct IndexOnlyScanState
+{
+	ScanState	ss;				/* its first field is NodeTag */
+	List	   *indexqual;
+	ScanKey		ioss_ScanKeys;
+	int			ioss_NumScanKeys;
+	ScanKey		ioss_OrderByKeys;
+	int			ioss_NumOrderByKeys;
+	IndexRuntimeKeyInfo *ioss_RuntimeKeys;
+	int			ioss_NumRuntimeKeys;
+	bool		ioss_RuntimeKeysReady;
+	ExprContext *ioss_RuntimeContext;
+	Relation	ioss_RelationDesc;
+	IndexScanDesc ioss_ScanDesc;
+	Buffer		ioss_VMBuffer;
+	long		ioss_HeapFetches;
+} IndexOnlyScanState;
 
 /* ----------------
  *	 BitmapIndexScanState information

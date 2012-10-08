@@ -4,7 +4,7 @@
  *	  prototypes for functions in backend/catalog/heap.c
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/catalog/heap.h
@@ -30,14 +30,18 @@ typedef struct CookedConstraint
 	char	   *name;			/* name, or NULL if none */
 	AttrNumber	attnum;			/* which attr (only for DEFAULT) */
 	Node	   *expr;			/* transformed default or check expr */
+	bool		skip_validation;	/* skip validation? (only for CHECK) */
 	bool		is_local;		/* constraint has local (non-inherited) def */
 	int			inhcount;		/* number of times constraint is inherited */
+	bool		is_no_inherit;	/* constraint has local def and cannot be
+								 * inherited */
 } CookedConstraint;
 
 extern Relation heap_create(const char *relname,
 			Oid relnamespace,
 			Oid reltablespace,
 			Oid relid,
+			Oid relfilenode,
 			TupleDesc tupDesc,
 			char relkind,
 			char relpersistence,
@@ -64,6 +68,8 @@ extern Oid heap_create_with_catalog(const char *relname,
 						 Datum reloptions,
 						 bool use_user_acl,
 						 bool allow_system_table_mods);
+
+extern void heap_create_init_fork(Relation rel);
 
 extern void heap_drop_with_catalog(Oid relid);
 
@@ -103,7 +109,7 @@ extern void DeleteRelationTuple(Oid relid);
 extern void DeleteAttributeTuples(Oid relid);
 extern void RemoveAttributeById(Oid relid, AttrNumber attnum);
 extern void RemoveAttrDefault(Oid relid, AttrNumber attnum,
-				  DropBehavior behavior, bool complain);
+				  DropBehavior behavior, bool complain, bool internal);
 extern void RemoveAttrDefaultById(Oid attrdefId);
 extern void RemoveStatistics(Oid relid, AttrNumber attnum);
 

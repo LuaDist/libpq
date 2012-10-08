@@ -3,7 +3,7 @@
  * async.c
  *	  Asynchronous notification: NOTIFY, LISTEN, UNLISTEN
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -132,6 +132,7 @@
 #include "utils/builtins.h"
 #include "utils/memutils.h"
 #include "utils/ps_status.h"
+#include "utils/timestamp.h"
 
 
 /*
@@ -193,7 +194,7 @@ typedef struct QueuePosition
 
 /* choose logically smaller QueuePosition */
 #define QUEUE_POS_MIN(x,y) \
-	(asyncQueuePagePrecedesLogically((x).page, (y).page) ? (x) : \
+	(asyncQueuePagePrecedes((x).page, (y).page) ? (x) : \
 	 (x).page != (y).page ? (y) : \
 	 (x).offset < (y).offset ? (x) : (y))
 
@@ -359,8 +360,7 @@ static bool backendHasExecutedInitialListen = false;
 bool		Trace_notify = false;
 
 /* local function prototypes */
-static bool asyncQueuePagePrecedesPhysically(int p, int q);
-static bool asyncQueuePagePrecedesLogically(int p, int q);
+static bool asyncQueuePagePrecedes(int p, int q);
 static void queue_listen(ListenActionKind action, const char *channel);
 static void Async_UnlistenOnExit(int code, Datum arg);
 static void Exec_ListenPreCommit(void);
@@ -387,25 +387,11 @@ static void NotifyMyFrontEnd(const char *channel,
 static bool AsyncExistsPendingNotify(const char *channel, const char *payload);
 static void ClearPendingActionsAndNotifies(void);
 
-
 /*
  * We will work on the page range of 0..QUEUE_MAX_PAGE.
- *
- * asyncQueuePagePrecedesPhysically just checks numerically without any magic
- * if one page precedes another one.  This is wrong for normal operation but
- * is helpful when clearing pg_notify/ during startup.
- *
- * asyncQueuePagePrecedesLogically compares using wraparound logic, as is
- * required by slru.c.
  */
 static bool
-asyncQueuePagePrecedesPhysically(int p, int q)
-{
-	return p < q;
-}
-
-static bool
-asyncQueuePagePrecedesLogically(int p, int q)
+asyncQueuePagePrecedes(int p, int q)
 {
 	int			diff;
 
@@ -483,7 +469,7 @@ AsyncShmemInit(void)
 	/*
 	 * Set up SLRU management of the pg_notify data.
 	 */
-	AsyncCtl->PagePrecedes = asyncQueuePagePrecedesLogically;
+	AsyncCtl->PagePrecedes = asyncQueuePagePrecedes;
 	SimpleLruInit(AsyncCtl, "Async Ctl", NUM_ASYNC_BUFFERS, 0,
 				  AsyncCtlLock, "pg_notify");
 	/* Override default assumption that writes should be fsync'd */
@@ -493,15 +479,8 @@ AsyncShmemInit(void)
 	{
 		/*
 		 * During start or reboot, clean out the pg_notify directory.
-		 *
-		 * Since we want to remove every file, we temporarily use
-		 * asyncQueuePagePrecedesPhysically() and pass INT_MAX as the
-		 * comparison value; every file in the directory should therefore
-		 * appear to be less than that.
 		 */
-		AsyncCtl->PagePrecedes = asyncQueuePagePrecedesPhysically;
-		(void) SlruScanDirectory(AsyncCtl, INT_MAX, true);
-		AsyncCtl->PagePrecedes = asyncQueuePagePrecedesLogically;
+		(void) SlruScanDirectory(AsyncCtl, SlruScanDirCbDeleteAll, NULL);
 
 		/* Now initialize page zero to empty */
 		LWLockAcquire(AsyncCtlLock, LW_EXCLUSIVE);
@@ -760,7 +739,7 @@ AtPrepare_Notify(void)
 	if (pendingActions || pendingNotifies)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("cannot PREPARE a transaction that has executed LISTEN, UNLISTEN or NOTIFY")));
+				 errmsg("cannot PREPARE a transaction that has executed LISTEN, UNLISTEN, or NOTIFY")));
 }
 
 /*
@@ -1222,7 +1201,7 @@ asyncQueueIsFull(void)
 		nexthead = 0;			/* wrap around */
 	boundary = QUEUE_POS_PAGE(QUEUE_TAIL);
 	boundary -= boundary % SLRU_PAGES_PER_SEGMENT;
-	return asyncQueuePagePrecedesLogically(nexthead, boundary);
+	return asyncQueuePagePrecedes(nexthead, boundary);
 }
 
 /*
@@ -1306,6 +1285,7 @@ static ListCell *
 asyncQueueAddEntries(ListCell *nextNotify)
 {
 	AsyncQueueEntry qe;
+	QueuePosition queue_head;
 	int			pageno;
 	int			offset;
 	int			slotno;
@@ -1313,8 +1293,21 @@ asyncQueueAddEntries(ListCell *nextNotify)
 	/* We hold both AsyncQueueLock and AsyncCtlLock during this operation */
 	LWLockAcquire(AsyncCtlLock, LW_EXCLUSIVE);
 
+	/*
+	 * We work with a local copy of QUEUE_HEAD, which we write back to shared
+	 * memory upon exiting.  The reason for this is that if we have to advance
+	 * to a new page, SimpleLruZeroPage might fail (out of disk space, for
+	 * instance), and we must not advance QUEUE_HEAD if it does.  (Otherwise,
+	 * subsequent insertions would try to put entries into a page that slru.c
+	 * thinks doesn't exist yet.)  So, use a local position variable.  Note
+	 * that if we do fail, any already-inserted queue entries are forgotten;
+	 * this is okay, since they'd be useless anyway after our transaction
+	 * rolls back.
+	 */
+	queue_head = QUEUE_HEAD;
+
 	/* Fetch the current page */
-	pageno = QUEUE_POS_PAGE(QUEUE_HEAD);
+	pageno = QUEUE_POS_PAGE(queue_head);
 	slotno = SimpleLruReadPage(AsyncCtl, pageno, true, InvalidTransactionId);
 	/* Note we mark the page dirty before writing in it */
 	AsyncCtl->shared->page_dirty[slotno] = true;
@@ -1326,7 +1319,7 @@ asyncQueueAddEntries(ListCell *nextNotify)
 		/* Construct a valid queue entry in local variable qe */
 		asyncQueueNotificationToEntry(n, &qe);
 
-		offset = QUEUE_POS_OFFSET(QUEUE_HEAD);
+		offset = QUEUE_POS_OFFSET(queue_head);
 
 		/* Check whether the entry really fits on the current page */
 		if (offset + qe.length <= QUEUE_PAGESIZE)
@@ -1352,8 +1345,8 @@ asyncQueueAddEntries(ListCell *nextNotify)
 			   &qe,
 			   qe.length);
 
-		/* Advance QUEUE_HEAD appropriately, and note if page is full */
-		if (asyncQueueAdvance(&(QUEUE_HEAD), qe.length))
+		/* Advance queue_head appropriately, and detect if page is full */
+		if (asyncQueueAdvance(&(queue_head), qe.length))
 		{
 			/*
 			 * Page is full, so we're done here, but first fill the next page
@@ -1363,11 +1356,14 @@ asyncQueueAddEntries(ListCell *nextNotify)
 			 * asyncQueueIsFull() ensured that there is room to create this
 			 * page without overrunning the queue.
 			 */
-			slotno = SimpleLruZeroPage(AsyncCtl, QUEUE_POS_PAGE(QUEUE_HEAD));
+			slotno = SimpleLruZeroPage(AsyncCtl, QUEUE_POS_PAGE(queue_head));
 			/* And exit the loop */
 			break;
 		}
 	}
+
+	/* Success, so update the global QUEUE_HEAD */
+	QUEUE_HEAD = queue_head;
 
 	LWLockRelease(AsyncCtlLock);
 
@@ -2073,7 +2069,7 @@ asyncQueueAdvanceTail(void)
 	 */
 	newtailpage = QUEUE_POS_PAGE(min);
 	boundary = newtailpage - (newtailpage % SLRU_PAGES_PER_SEGMENT);
-	if (asyncQueuePagePrecedesLogically(oldtailpage, boundary))
+	if (asyncQueuePagePrecedes(oldtailpage, boundary))
 	{
 		/*
 		 * SimpleLruTruncate() will ask for AsyncCtlLock but will also release

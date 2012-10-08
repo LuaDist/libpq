@@ -3,9 +3,11 @@
  *
  *	database server functions
  *
- *	Copyright (c) 2010-2011, PostgreSQL Global Development Group
+ *	Copyright (c) 2010-2012, PostgreSQL Global Development Group
  *	contrib/pg_upgrade/server.c
  */
+
+#include "postgres.h"
 
 #include "pg_upgrade.h"
 
@@ -44,18 +46,51 @@ connectToServer(ClusterInfo *cluster, const char *db_name)
 /*
  * get_db_conn()
  *
- * get database connection
+ * get database connection, using named database + standard params for cluster
  */
 static PGconn *
 get_db_conn(ClusterInfo *cluster, const char *db_name)
 {
-	char		conn_opts[MAXPGPATH];
+	char		conn_opts[2 * NAMEDATALEN + MAXPGPATH + 100];
 
-	snprintf(conn_opts, sizeof(conn_opts),
-			 "dbname = '%s' user = '%s' port = %d", db_name, os_info.user,
-			 cluster->port);
+	if (cluster->sockdir)
+		snprintf(conn_opts, sizeof(conn_opts),
+				 "dbname = '%s' user = '%s' host = '%s' port = %d",
+				 db_name, os_info.user, cluster->sockdir, cluster->port);
+	else
+		snprintf(conn_opts, sizeof(conn_opts),
+				 "dbname = '%s' user = '%s' port = %d",
+				 db_name, os_info.user, cluster->port);
 
 	return PQconnectdb(conn_opts);
+}
+
+
+/*
+ * cluster_conn_opts()
+ *
+ * Return standard command-line options for connecting to this cluster when
+ * using psql, pg_dump, etc.  Ideally this would match what get_db_conn()
+ * sets, but the utilities we need aren't very consistent about the treatment
+ * of database name options, so we leave that out.
+ *
+ * Note result is in static storage, so use it right away.
+ */
+char *
+cluster_conn_opts(ClusterInfo *cluster)
+{
+	static char	conn_opts[MAXPGPATH + NAMEDATALEN + 100];
+
+	if (cluster->sockdir)
+		snprintf(conn_opts, sizeof(conn_opts),
+				 "--host \"%s\" --port %d --username \"%s\"",
+				 cluster->sockdir, cluster->port, os_info.user);
+	else
+		snprintf(conn_opts, sizeof(conn_opts),
+				 "--port %d --username \"%s\"",
+				 cluster->port, os_info.user);
+
+	return conn_opts;
 }
 
 
@@ -78,13 +113,13 @@ executeQueryOrDie(PGconn *conn, const char *fmt,...)
 	vsnprintf(command, sizeof(command), fmt, args);
 	va_end(args);
 
-	pg_log(PG_DEBUG, "executing: %s\n", command);
+	pg_log(PG_VERBOSE, "executing: %s\n", command);
 	result = PQexec(conn, command);
 	status = PQresultStatus(result);
 
 	if ((status != PGRES_TUPLES_OK) && (status != PGRES_COMMAND_OK))
 	{
-		pg_log(PG_REPORT, "DB command failed\n%s\n%s\n", command,
+		pg_log(PG_REPORT, "SQL command failed\n%s\n%s\n", command,
 			   PQerrorMessage(conn));
 		PQclear(result);
 		PQfinish(conn);
@@ -99,27 +134,27 @@ executeQueryOrDie(PGconn *conn, const char *fmt,...)
 /*
  * get_major_server_version()
  *
- * gets the version (in unsigned int form) for the given "datadir". Assumes
+ * gets the version (in unsigned int form) for the given datadir. Assumes
  * that datadir is an absolute path to a valid pgdata directory. The version
  * is retrieved by reading the PG_VERSION file.
  */
 uint32
 get_major_server_version(ClusterInfo *cluster)
 {
-	const char *datadir = cluster->pgdata;
 	FILE	   *version_fd;
 	char		ver_filename[MAXPGPATH];
 	int			integer_version = 0;
 	int			fractional_version = 0;
 
-	snprintf(ver_filename, sizeof(ver_filename), "%s/PG_VERSION", datadir);
+	snprintf(ver_filename, sizeof(ver_filename), "%s/PG_VERSION",
+			 cluster->pgdata);
 	if ((version_fd = fopen(ver_filename, "r")) == NULL)
 		return 0;
 
 	if (fscanf(version_fd, "%63s", cluster->major_version_str) == 0 ||
 		sscanf(cluster->major_version_str, "%d.%d", &integer_version,
 			   &fractional_version) != 2)
-		pg_log(PG_FATAL, "could not get version from %s\n", datadir);
+		pg_log(PG_FATAL, "could not get version from %s\n", cluster->pgdata);
 
 	fclose(version_fd);
 
@@ -128,11 +163,7 @@ get_major_server_version(ClusterInfo *cluster)
 
 
 static void
-#ifdef HAVE_ATEXIT
 stop_postmaster_atexit(void)
-#else
-stop_postmaster_on_exit(int exitstatus, void *arg)
-#endif
 {
 	stop_postmaster(true);
 
@@ -142,33 +173,34 @@ stop_postmaster_on_exit(int exitstatus, void *arg)
 void
 start_postmaster(ClusterInfo *cluster)
 {
-	char		cmd[MAXPGPATH];
+	char		cmd[MAXPGPATH * 4 + 1000];
 	PGconn	   *conn;
 	bool		exit_hook_registered = false;
-	int			pg_ctl_return = 0;
-
-#ifndef WIN32
-	char	   *output_filename = log_opts.filename;
-#else
-
-	/*
-	 * On Win32, we can't send both pg_upgrade output and pg_ctl output to the
-	 * same file because we get the error: "The process cannot access the file
-	 * because it is being used by another process." so we have to send all
-	 * other output to 'nul'.
-	 */
-	char	   *output_filename = DEVNULL;
-#endif
+	bool		pg_ctl_return = false;
+	char		socket_string[MAXPGPATH + 200];
 
 	if (!exit_hook_registered)
 	{
-#ifdef HAVE_ATEXIT
 		atexit(stop_postmaster_atexit);
-#else
-		on_exit(stop_postmaster_on_exit);
-#endif
 		exit_hook_registered = true;
 	}
+
+	socket_string[0] = '\0';
+
+#ifdef HAVE_UNIX_SOCKETS
+	/* prevent TCP/IP connections, restrict socket access */
+	strcat(socket_string,
+		   " -c listen_addresses='' -c unix_socket_permissions=0700");
+
+	/* Have a sockdir?  Tell the postmaster. */
+	if (cluster->sockdir)
+		snprintf(socket_string + strlen(socket_string),
+				 sizeof(socket_string) - strlen(socket_string),
+				 " -c %s='%s'",
+				 (GET_MAJOR_VERSION(cluster->major_version) < 903) ?
+				 "unix_socket_directory" : "unix_socket_directories",
+				 cluster->sockdir);
+#endif
 
 	/*
 	 * Using autovacuum=off disables cleanup vacuum and analyze, but freeze
@@ -178,19 +210,24 @@ start_postmaster(ClusterInfo *cluster)
 	 * not touch them.
 	 */
 	snprintf(cmd, sizeof(cmd),
-			 SYSTEMQUOTE "\"%s/pg_ctl\" -w -l \"%s\" -D \"%s\" "
-			 "-o \"-p %d %s\" start >> \"%s\" 2>&1" SYSTEMQUOTE,
-			 cluster->bindir, output_filename, cluster->pgdata, cluster->port,
+			 "\"%s/pg_ctl\" -w -l \"%s\" -D \"%s\" -o \"-p %d %s %s%s\" start",
+		  cluster->bindir, SERVER_LOG_FILE, cluster->pgconfig, cluster->port,
 			 (cluster->controldata.cat_ver >=
 			  BINARY_UPGRADE_SERVER_FLAG_CAT_VER) ? "-b" :
 			 "-c autovacuum=off -c autovacuum_freeze_max_age=2000000000",
-			 output_filename);
+			 cluster->pgopts ? cluster->pgopts : "", socket_string);
 
 	/*
 	 * Don't throw an error right away, let connecting throw the error because
 	 * it might supply a reason for the failure.
 	 */
-	pg_ctl_return = exec_prog(false, "%s", cmd);
+	pg_ctl_return = exec_prog(SERVER_START_LOG_FILE,
+							  /* pass both file names if they differ */
+							  (strcmp(SERVER_LOG_FILE,
+									  SERVER_START_LOG_FILE) != 0) ?
+							  SERVER_LOG_FILE : NULL,
+							  false,
+							  "%s", cmd);
 
 	/* Check to see if we can connect to the server; if not, report it. */
 	if ((conn = get_db_conn(cluster, "template1")) == NULL ||
@@ -200,14 +237,15 @@ start_postmaster(ClusterInfo *cluster)
 			   PQerrorMessage(conn));
 		if (conn)
 			PQfinish(conn);
-		pg_log(PG_FATAL, "unable to connect to %s postmaster started with the command: %s\n",
+		pg_log(PG_FATAL, "could not connect to %s postmaster started with the command:\n"
+			   "%s\n",
 			   CLUSTER_NAME(cluster), cmd);
 	}
 	PQfinish(conn);
 
 	/* If the connection didn't fail, fail now */
-	if (pg_ctl_return != 0)
-		pg_log(PG_FATAL, "pg_ctl failed to start the %s server\n",
+	if (!pg_ctl_return)
+		pg_log(PG_FATAL, "pg_ctl failed to start the %s server, or connection failed\n",
 			   CLUSTER_NAME(cluster));
 
 	os_info.running_cluster = cluster;
@@ -217,37 +255,20 @@ start_postmaster(ClusterInfo *cluster)
 void
 stop_postmaster(bool fast)
 {
-	char		cmd[MAXPGPATH];
-	const char *bindir;
-	const char *datadir;
-
-#ifndef WIN32
-	char	   *output_filename = log_opts.filename;
-#else
-	/* See comment in start_postmaster() about why win32 output is ignored. */
-	char	   *output_filename = DEVNULL;
-#endif
+	ClusterInfo *cluster;
 
 	if (os_info.running_cluster == &old_cluster)
-	{
-		bindir = old_cluster.bindir;
-		datadir = old_cluster.pgdata;
-	}
+		cluster = &old_cluster;
 	else if (os_info.running_cluster == &new_cluster)
-	{
-		bindir = new_cluster.bindir;
-		datadir = new_cluster.pgdata;
-	}
+		cluster = &new_cluster;
 	else
 		return;					/* no cluster running */
 
-	snprintf(cmd, sizeof(cmd),
-			 SYSTEMQUOTE "\"%s/pg_ctl\" -w -l \"%s\" -D \"%s\" %s stop >> "
-			 "\"%s\" 2>&1" SYSTEMQUOTE,
-			 bindir, output_filename, datadir, fast ? "-m fast" : "",
-			 output_filename);
-
-	exec_prog(fast ? false : true, "%s", cmd);
+	exec_prog(SERVER_STOP_LOG_FILE, NULL, !fast,
+			  "\"%s/pg_ctl\" -w -D \"%s\" -o \"%s\" %s stop",
+			  cluster->bindir, cluster->pgconfig,
+			  cluster->pgopts ? cluster->pgopts : "",
+			  fast ? "-m fast" : "");
 
 	os_info.running_cluster = NULL;
 }

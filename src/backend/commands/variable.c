@@ -4,7 +4,7 @@
  *		Routines for handling specialized SET variables.
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -26,6 +26,7 @@
 #include "utils/builtins.h"
 #include "utils/syscache.h"
 #include "utils/snapmgr.h"
+#include "utils/timestamp.h"
 #include "mb/pg_wchar.h"
 
 /*
@@ -258,23 +259,6 @@ check_timezone(char **newval, void **extra, GucSource source)
 	char	   *endptr;
 	double		hours;
 
-	if (*newval == NULL)
-	{
-		/*
-		 * The boot_val given for TimeZone in guc.c is NULL.  When we see this
-		 * we just do nothing.	If this isn't overridden from the config file
-		 * then pg_timezone_initialize() will eventually select a default
-		 * value from the environment.	This hack has two purposes: to avoid
-		 * wasting cycles loading values that might soon be overridden from
-		 * the config file, and to avoid trying to read the timezone files
-		 * during InitializeGUCOptions().  The latter doesn't work in an
-		 * EXEC_BACKEND subprocess because my_exec_path hasn't been set yet
-		 * and so we can't locate PGSHAREDIR.
-		 */
-		Assert(source == PGC_S_DEFAULT);
-		return true;
-	}
-
 	/*
 	 * Initialize the "extra" struct that will be passed to assign_timezone.
 	 * We don't want to change any of the three global variables except as
@@ -373,7 +357,7 @@ check_timezone(char **newval, void **extra, GucSource source)
 				return false;
 			}
 
-			if (!tz_acceptable(new_tz))
+			if (!pg_tz_acceptable(new_tz))
 			{
 				GUC_check_errmsg("time zone \"%s\" appears to use leap seconds",
 								 *newval);
@@ -425,10 +409,6 @@ void
 assign_timezone(const char *newval, void *extra)
 {
 	timezone_extra *myextra = (timezone_extra *) extra;
-
-	/* Do nothing for the boot_val default of NULL */
-	if (!myextra)
-		return;
 
 	session_timezone = myextra->session_timezone;
 	CTimeZone = myextra->CTimeZone;
@@ -489,20 +469,8 @@ check_log_timezone(char **newval, void **extra, GucSource source)
 {
 	pg_tz	   *new_tz;
 
-	if (*newval == NULL)
-	{
-		/*
-		 * The boot_val given for log_timezone in guc.c is NULL.  When we see
-		 * this we just do nothing.  If this isn't overridden from the config
-		 * file then pg_timezone_initialize() will eventually select a default
-		 * value from the environment.
-		 */
-		Assert(source == PGC_S_DEFAULT);
-		return true;
-	}
-
 	/*
-	 * Otherwise assume it is a timezone name, and try to load it.
+	 * Assume it is a timezone name, and try to load it.
 	 */
 	new_tz = pg_tzset(*newval);
 
@@ -512,7 +480,7 @@ check_log_timezone(char **newval, void **extra, GucSource source)
 		return false;
 	}
 
-	if (!tz_acceptable(new_tz))
+	if (!pg_tz_acceptable(new_tz))
 	{
 		GUC_check_errmsg("time zone \"%s\" appears to use leap seconds",
 						 *newval);
@@ -537,10 +505,6 @@ check_log_timezone(char **newval, void **extra, GucSource source)
 void
 assign_log_timezone(const char *newval, void *extra)
 {
-	/* Do nothing for the boot_val default of NULL */
-	if (!extra)
-		return;
-
 	log_timezone = *((pg_tz **) extra);
 }
 
@@ -569,11 +533,16 @@ show_log_timezone(void)
  * read-only may be changed to read-write only when in a top-level transaction
  * that has not yet taken an initial snapshot.	Can't do it in a hot standby
  * slave, either.
+ *
+ * If we are not in a transaction at all, just allow the change; it means
+ * nothing since XactReadOnly will be reset by the next StartTransaction().
+ * The IsTransactionState() test protects us against trying to check
+ * RecoveryInProgress() in contexts where shared memory is not accessible.
  */
 bool
 check_transaction_read_only(bool *newval, void **extra, GucSource source)
 {
-	if (*newval == false && XactReadOnly)
+	if (*newval == false && XactReadOnly && IsTransactionState())
 	{
 		/* Can't go to r/w mode inside a r/o transaction */
 		if (IsSubTransaction())
@@ -592,6 +561,7 @@ check_transaction_read_only(bool *newval, void **extra, GucSource source)
 		/* Can't go to r/w mode while recovery is still active */
 		if (RecoveryInProgress())
 		{
+			GUC_check_errcode(ERRCODE_FEATURE_NOT_SUPPORTED);
 			GUC_check_errmsg("cannot set transaction read-write mode during recovery");
 			return false;
 		}
@@ -605,6 +575,8 @@ check_transaction_read_only(bool *newval, void **extra, GucSource source)
  *
  * We allow idempotent changes at any time, but otherwise this can only be
  * changed in a toplevel transaction that has not yet taken a snapshot.
+ *
+ * As in check_transaction_read_only, allow it if not inside a transaction.
  */
 bool
 check_XactIsoLevel(char **newval, void **extra, GucSource source)
@@ -634,7 +606,7 @@ check_XactIsoLevel(char **newval, void **extra, GucSource source)
 	else
 		return false;
 
-	if (newXactIsoLevel != XactIsoLevel)
+	if (newXactIsoLevel != XactIsoLevel && IsTransactionState())
 	{
 		if (FirstSnapshotSet)
 		{
@@ -652,6 +624,7 @@ check_XactIsoLevel(char **newval, void **extra, GucSource source)
 		/* Can't go to serializable mode while recovery is still active */
 		if (newXactIsoLevel == XACT_SERIALIZABLE && RecoveryInProgress())
 		{
+			GUC_check_errcode(ERRCODE_FEATURE_NOT_SUPPORTED);
 			GUC_check_errmsg("cannot use serializable mode in a hot standby");
 			GUC_check_errhint("You can use REPEATABLE READ instead.");
 			return false;

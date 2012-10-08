@@ -44,7 +44,7 @@ PERLCHUNKS = plc_perlboot.pl plc_trusted.pl
 SHLIB_LINK = $(perl_embed_ldflags)
 
 REGRESS_OPTS = --dbname=$(PL_TESTDB) --load-extension=plperl  --load-extension=plperlu
-REGRESS = plperl plperl_trigger plperl_shared plperl_elog plperl_util plperl_init plperlu plperl_array
+REGRESS = plperl plperl_lc plperl_trigger plperl_shared plperl_elog plperl_util plperl_init plperlu plperl_array
 # if Perl can support two interpreters in one backend,
 # test plperl-and-plperlu cases
 ifneq ($(PERL),)
@@ -55,9 +55,12 @@ endif
 # where to find psql for running the tests
 PSQLDIR = $(bindir)
 
+# where to find xsubpp for building XS.
+XSUBPPDIR = $(shell $(PERL) -e 'use List::Util qw(first); print first { -r "$$_/ExtUtils/xsubpp" } @INC')
+
 include $(top_srcdir)/src/Makefile.shlib
 
-plperl.o: perlchunks.h plperl_opmask.h
+plperl.o: perlchunks.h plperl_opmask.h plperl_helpers.h
 
 plperl_opmask.h: plperl_opmask.pl
 	@if [ x"$(perl_privlibexp)" = x"" ]; then echo "configure switch --with-perl was not specified."; exit 1; fi
@@ -69,13 +72,13 @@ perlchunks.h: $(PERLCHUNKS)
 
 all: all-lib
 
-SPI.c: SPI.xs
+SPI.c: SPI.xs plperl_helpers.h
 	@if [ x"$(perl_privlibexp)" = x"" ]; then echo "configure switch --with-perl was not specified."; exit 1; fi
-	$(PERL) $(perl_privlibexp)/ExtUtils/xsubpp -typemap $(perl_privlibexp)/ExtUtils/typemap $< >$@
+	$(PERL) $(XSUBPPDIR)/ExtUtils/xsubpp -typemap $(perl_privlibexp)/ExtUtils/typemap $< >$@
 
-Util.c: Util.xs
+Util.c: Util.xs plperl_helpers.h
 	@if [ x"$(perl_privlibexp)" = x"" ]; then echo "configure switch --with-perl was not specified."; exit 1; fi
-	$(PERL) $(perl_privlibexp)/ExtUtils/xsubpp -typemap $(perl_privlibexp)/ExtUtils/typemap $< >$@
+	$(PERL) $(XSUBPPDIR)/ExtUtils/xsubpp -typemap $(perl_privlibexp)/ExtUtils/typemap $< >$@
 
 
 install: all install-lib install-data
@@ -94,7 +97,7 @@ uninstall-data:
 .PHONY: install-data uninstall-data
 
 
-check: submake
+check: all submake
 	$(pg_regress_check) $(REGRESS_OPTS) $(REGRESS)
 
 installcheck: submake

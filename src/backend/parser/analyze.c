@@ -10,11 +10,11 @@
  * utility commands, no locks are obtained here (and if they were, we could
  * not be sure we'd still have them at execution).  Hence the general rule
  * for utility commands is to just dump them into a Query node untransformed.
- * DECLARE CURSOR and EXPLAIN are exceptions because they contain
- * optimizable statements.
+ * DECLARE CURSOR, EXPLAIN, and CREATE TABLE AS are exceptions because they
+ * contain optimizable statements, which we should transform.
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *	src/backend/parser/analyze.c
@@ -44,6 +44,9 @@
 #include "utils/rel.h"
 
 
+/* Hook for plugins to get control at end of parse analysis */
+post_parse_analyze_hook_type post_parse_analyze_hook = NULL;
+
 static Query *transformDeleteStmt(ParseState *pstate, DeleteStmt *stmt);
 static Query *transformInsertStmt(ParseState *pstate, InsertStmt *stmt);
 static List *transformInsertRow(ParseState *pstate, List *exprlist,
@@ -56,13 +59,14 @@ static Node *transformSetOperationTree(ParseState *pstate, SelectStmt *stmt,
 						  bool isTopLevel, List **targetlist);
 static void determineRecursiveColTypes(ParseState *pstate,
 						   Node *larg, List *nrtargetlist);
-static void applyColumnNames(List *dst, List *src);
 static Query *transformUpdateStmt(ParseState *pstate, UpdateStmt *stmt);
 static List *transformReturningList(ParseState *pstate, List *returningList);
 static Query *transformDeclareCursorStmt(ParseState *pstate,
 						   DeclareCursorStmt *stmt);
 static Query *transformExplainStmt(ParseState *pstate,
 					 ExplainStmt *stmt);
+static Query *transformCreateTableAsStmt(ParseState *pstate,
+						   CreateTableAsStmt *stmt);
 static void transformLockingClause(ParseState *pstate, Query *qry,
 					   LockingClause *lc, bool pushedDown);
 
@@ -92,7 +96,10 @@ parse_analyze(Node *parseTree, const char *sourceText,
 	if (numParams > 0)
 		parse_fixed_parameters(pstate, paramTypes, numParams);
 
-	query = transformStmt(pstate, parseTree);
+	query = transformTopLevelStmt(pstate, parseTree);
+
+	if (post_parse_analyze_hook)
+		(*post_parse_analyze_hook) (pstate, query);
 
 	free_parsestate(pstate);
 
@@ -119,10 +126,13 @@ parse_analyze_varparams(Node *parseTree, const char *sourceText,
 
 	parse_variable_parameters(pstate, paramTypes, numParams);
 
-	query = transformStmt(pstate, parseTree);
+	query = transformTopLevelStmt(pstate, parseTree);
 
 	/* make sure all is well with parameter types */
 	check_variable_parameters(pstate, query);
+
+	if (post_parse_analyze_hook)
+		(*post_parse_analyze_hook) (pstate, query);
 
 	free_parsestate(pstate);
 
@@ -152,8 +162,52 @@ parse_sub_analyze(Node *parseTree, ParseState *parentParseState,
 }
 
 /*
- * transformStmt -
+ * transformTopLevelStmt -
  *	  transform a Parse tree into a Query tree.
+ *
+ * The only thing we do here that we don't do in transformStmt() is to
+ * convert SELECT ... INTO into CREATE TABLE AS.  Since utility statements
+ * aren't allowed within larger statements, this is only allowed at the top
+ * of the parse tree, and so we only try it before entering the recursive
+ * transformStmt() processing.
+ */
+Query *
+transformTopLevelStmt(ParseState *pstate, Node *parseTree)
+{
+	if (IsA(parseTree, SelectStmt))
+	{
+		SelectStmt *stmt = (SelectStmt *) parseTree;
+
+		/* If it's a set-operation tree, drill down to leftmost SelectStmt */
+		while (stmt && stmt->op != SETOP_NONE)
+			stmt = stmt->larg;
+		Assert(stmt && IsA(stmt, SelectStmt) &&stmt->larg == NULL);
+
+		if (stmt->intoClause)
+		{
+			CreateTableAsStmt *ctas = makeNode(CreateTableAsStmt);
+
+			ctas->query = parseTree;
+			ctas->into = stmt->intoClause;
+			ctas->is_select_into = true;
+
+			/*
+			 * Remove the intoClause from the SelectStmt.  This makes it safe
+			 * for transformSelectStmt to complain if it finds intoClause set
+			 * (implying that the INTO appeared in a disallowed place).
+			 */
+			stmt->intoClause = NULL;
+
+			parseTree = (Node *) ctas;
+		}
+	}
+
+	return transformStmt(pstate, parseTree);
+}
+
+/*
+ * transformStmt -
+ *	  recursively transform a Parse tree into a Query tree.
  */
 Query *
 transformStmt(ParseState *pstate, Node *parseTree)
@@ -201,6 +255,11 @@ transformStmt(ParseState *pstate, Node *parseTree)
 		case T_ExplainStmt:
 			result = transformExplainStmt(pstate,
 										  (ExplainStmt *) parseTree);
+			break;
+
+		case T_CreateTableAsStmt:
+			result = transformCreateTableAsStmt(pstate,
+											(CreateTableAsStmt *) parseTree);
 			break;
 
 		default:
@@ -259,6 +318,7 @@ analyze_requires_snapshot(Node *parseTree)
 			break;
 
 		case T_ExplainStmt:
+		case T_CreateTableAsStmt:
 			/* yes, because we must analyze the contained statement */
 			result = true;
 			break;
@@ -317,12 +377,12 @@ transformDeleteStmt(ParseState *pstate, DeleteStmt *stmt)
 	qry->jointree = makeFromExpr(pstate->p_joinlist, qual);
 
 	qry->hasSubLinks = pstate->p_hasSubLinks;
-	qry->hasAggs = pstate->p_hasAggs;
-	if (pstate->p_hasAggs)
-		parseCheckAggregates(pstate, qry);
 	qry->hasWindowFuncs = pstate->p_hasWindowFuncs;
 	if (pstate->p_hasWindowFuncs)
 		parseCheckWindowFuncs(pstate, qry);
+	qry->hasAggs = pstate->p_hasAggs;
+	if (pstate->p_hasAggs)
+		parseCheckAggregates(pstate, qry);
 
 	assign_query_collations(pstate, qry);
 
@@ -460,17 +520,11 @@ transformInsertStmt(ParseState *pstate, InsertStmt *stmt)
 
 		free_parsestate(sub_pstate);
 
-		/* The grammar should have produced a SELECT, but it might have INTO */
+		/* The grammar should have produced a SELECT */
 		if (!IsA(selectQuery, Query) ||
 			selectQuery->commandType != CMD_SELECT ||
 			selectQuery->utilityStmt != NULL)
 			elog(ERROR, "unexpected non-SELECT command in INSERT ... SELECT");
-		if (selectQuery->intoClause)
-			ereport(ERROR,
-					(errcode(ERRCODE_SYNTAX_ERROR),
-					 errmsg("INSERT ... SELECT cannot specify INTO"),
-					 parser_errposition(pstate,
-						   exprLocation((Node *) selectQuery->intoClause))));
 
 		/*
 		 * Make the source be a subquery in the INSERT's rangetable, and add
@@ -539,6 +593,8 @@ transformInsertStmt(ParseState *pstate, InsertStmt *stmt)
 		List	   *collations = NIL;
 		int			sublist_length = -1;
 		int			i;
+
+		Assert(selectStmt->intoClause == NULL);
 
 		foreach(lc, selectStmt->valuesLists)
 		{
@@ -654,6 +710,7 @@ transformInsertStmt(ParseState *pstate, InsertStmt *stmt)
 		List	   *valuesLists = selectStmt->valuesLists;
 
 		Assert(list_length(valuesLists) == 1);
+		Assert(selectStmt->intoClause == NULL);
 
 		/* Do basic expression transformation (same as a ROW() expr) */
 		exprList = transformExpressionList(pstate,
@@ -887,6 +944,14 @@ transformSelectStmt(ParseState *pstate, SelectStmt *stmt)
 		qry->hasModifyingCTE = pstate->p_hasModifyingCTE;
 	}
 
+	/* Complain if we get called from someplace where INTO is not allowed */
+	if (stmt->intoClause)
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("SELECT ... INTO is not allowed here"),
+				 parser_errposition(pstate,
+								  exprLocation((Node *) stmt->intoClause))));
+
 	/* make FOR UPDATE/FOR SHARE info available to addRangeTableEntry */
 	pstate->p_locking_clause = stmt->lockingClause;
 
@@ -964,24 +1029,16 @@ transformSelectStmt(ParseState *pstate, SelectStmt *stmt)
 												   pstate->p_windowdefs,
 												   &qry->targetList);
 
-	/* handle any SELECT INTO/CREATE TABLE AS spec */
-	if (stmt->intoClause)
-	{
-		qry->intoClause = stmt->intoClause;
-		if (stmt->intoClause->colNames)
-			applyColumnNames(qry->targetList, stmt->intoClause->colNames);
-	}
-
 	qry->rtable = pstate->p_rtable;
 	qry->jointree = makeFromExpr(pstate->p_joinlist, qual);
 
 	qry->hasSubLinks = pstate->p_hasSubLinks;
-	qry->hasAggs = pstate->p_hasAggs;
-	if (pstate->p_hasAggs || qry->groupClause || qry->havingQual)
-		parseCheckAggregates(pstate, qry);
 	qry->hasWindowFuncs = pstate->p_hasWindowFuncs;
 	if (pstate->p_hasWindowFuncs)
 		parseCheckWindowFuncs(pstate, qry);
+	qry->hasAggs = pstate->p_hasAggs;
+	if (pstate->p_hasAggs || qry->groupClause || qry->havingQual)
+		parseCheckAggregates(pstate, qry);
 
 	foreach(l, stmt->lockingClause)
 	{
@@ -1019,6 +1076,7 @@ transformValuesClause(ParseState *pstate, SelectStmt *stmt)
 
 	/* Most SELECT stuff doesn't apply in a VALUES clause */
 	Assert(stmt->distinctClause == NIL);
+	Assert(stmt->intoClause == NULL);
 	Assert(stmt->targetList == NIL);
 	Assert(stmt->fromClause == NIL);
 	Assert(stmt->whereClause == NULL);
@@ -1191,14 +1249,6 @@ transformValuesClause(ParseState *pstate, SelectStmt *stmt)
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 			 errmsg("SELECT FOR UPDATE/SHARE cannot be applied to VALUES")));
 
-	/* handle any CREATE TABLE AS spec */
-	if (stmt->intoClause)
-	{
-		qry->intoClause = stmt->intoClause;
-		if (stmt->intoClause->colNames)
-			applyColumnNames(qry->targetList, stmt->intoClause->colNames);
-	}
-
 	/*
 	 * There mustn't have been any table references in the expressions, else
 	 * strange things would happen, like Cartesian products of those tables
@@ -1268,11 +1318,11 @@ transformSetOperationStmt(ParseState *pstate, SelectStmt *stmt)
 	int			leftmostRTI;
 	Query	   *leftmostQuery;
 	SetOperationStmt *sostmt;
-	List	   *intoColNames = NIL;
 	List	   *sortClause;
 	Node	   *limitOffset;
 	Node	   *limitCount;
 	List	   *lockingClause;
+	WithClause *withClause;
 	Node	   *node;
 	ListCell   *left_tlist,
 			   *lct,
@@ -1289,17 +1339,13 @@ transformSetOperationStmt(ParseState *pstate, SelectStmt *stmt)
 
 	qry->commandType = CMD_SELECT;
 
-	/* process the WITH clause independently of all else */
-	if (stmt->withClause)
-	{
-		qry->hasRecursive = stmt->withClause->recursive;
-		qry->cteList = transformWithClause(pstate, stmt->withClause);
-		qry->hasModifyingCTE = pstate->p_hasModifyingCTE;
-	}
-
 	/*
-	 * Find leftmost leaf SelectStmt; extract the one-time-only items from it
-	 * and from the top-level node.
+	 * Find leftmost leaf SelectStmt.  We currently only need to do this in
+	 * order to deliver a suitable error message if there's an INTO clause
+	 * there, implying the set-op tree is in a context that doesn't allow
+	 * INTO.  (transformSetOperationTree would throw error anyway, but it
+	 * seems worth the trouble to throw a different error for non-leftmost
+	 * INTO, so we produce that error in transformSetOperationTree.)
 	 */
 	leftmostSelect = stmt->larg;
 	while (leftmostSelect && leftmostSelect->op != SETOP_NONE)
@@ -1307,34 +1353,42 @@ transformSetOperationStmt(ParseState *pstate, SelectStmt *stmt)
 	Assert(leftmostSelect && IsA(leftmostSelect, SelectStmt) &&
 		   leftmostSelect->larg == NULL);
 	if (leftmostSelect->intoClause)
-	{
-		qry->intoClause = leftmostSelect->intoClause;
-		intoColNames = leftmostSelect->intoClause->colNames;
-	}
-
-	/* clear this to prevent complaints in transformSetOperationTree() */
-	leftmostSelect->intoClause = NULL;
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("SELECT ... INTO is not allowed here"),
+				 parser_errposition(pstate,
+						exprLocation((Node *) leftmostSelect->intoClause))));
 
 	/*
-	 * These are not one-time, exactly, but we want to process them here and
-	 * not let transformSetOperationTree() see them --- else it'll just
-	 * recurse right back here!
+	 * We need to extract ORDER BY and other top-level clauses here and not
+	 * let transformSetOperationTree() see them --- else it'll just recurse
+	 * right back here!
 	 */
 	sortClause = stmt->sortClause;
 	limitOffset = stmt->limitOffset;
 	limitCount = stmt->limitCount;
 	lockingClause = stmt->lockingClause;
+	withClause = stmt->withClause;
 
 	stmt->sortClause = NIL;
 	stmt->limitOffset = NULL;
 	stmt->limitCount = NULL;
 	stmt->lockingClause = NIL;
+	stmt->withClause = NULL;
 
 	/* We don't support FOR UPDATE/SHARE with set ops at the moment. */
 	if (lockingClause)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("SELECT FOR UPDATE/SHARE is not allowed with UNION/INTERSECT/EXCEPT")));
+
+	/* Process the WITH clause independently of all else */
+	if (withClause)
+	{
+		qry->hasRecursive = withClause->recursive;
+		qry->cteList = transformWithClause(pstate, withClause);
+		qry->hasModifyingCTE = pstate->p_hasModifyingCTE;
+	}
 
 	/*
 	 * Recursively transform the components of the tree.
@@ -1460,29 +1514,16 @@ transformSetOperationStmt(ParseState *pstate, SelectStmt *stmt)
 	qry->limitCount = transformLimitClause(pstate, limitCount,
 										   "LIMIT");
 
-	/*
-	 * Handle SELECT INTO/CREATE TABLE AS.
-	 *
-	 * Any column names from CREATE TABLE AS need to be attached to both the
-	 * top level and the leftmost subquery.  We do not do this earlier because
-	 * we do *not* want sortClause processing to be affected.
-	 */
-	if (intoColNames)
-	{
-		applyColumnNames(qry->targetList, intoColNames);
-		applyColumnNames(leftmostQuery->targetList, intoColNames);
-	}
-
 	qry->rtable = pstate->p_rtable;
 	qry->jointree = makeFromExpr(pstate->p_joinlist, NULL);
 
 	qry->hasSubLinks = pstate->p_hasSubLinks;
-	qry->hasAggs = pstate->p_hasAggs;
-	if (pstate->p_hasAggs || qry->groupClause || qry->havingQual)
-		parseCheckAggregates(pstate, qry);
 	qry->hasWindowFuncs = pstate->p_hasWindowFuncs;
 	if (pstate->p_hasWindowFuncs)
 		parseCheckWindowFuncs(pstate, qry);
+	qry->hasAggs = pstate->p_hasAggs;
+	if (pstate->p_hasAggs || qry->groupClause || qry->havingQual)
+		parseCheckAggregates(pstate, qry);
 
 	foreach(l, lockingClause)
 	{
@@ -1534,10 +1575,10 @@ transformSetOperationTree(ParseState *pstate, SelectStmt *stmt,
 				 errmsg("SELECT FOR UPDATE/SHARE is not allowed with UNION/INTERSECT/EXCEPT")));
 
 	/*
-	 * If an internal node of a set-op tree has ORDER BY, LIMIT, or FOR UPDATE
-	 * clauses attached, we need to treat it like a leaf node to generate an
-	 * independent sub-Query tree.	Otherwise, it can be represented by a
-	 * SetOperationStmt node underneath the parent Query.
+	 * If an internal node of a set-op tree has ORDER BY, LIMIT, FOR UPDATE,
+	 * or WITH clauses attached, we need to treat it like a leaf node to
+	 * generate an independent sub-Query tree.  Otherwise, it can be
+	 * represented by a SetOperationStmt node underneath the parent Query.
 	 */
 	if (stmt->op == SETOP_NONE)
 	{
@@ -1548,7 +1589,7 @@ transformSetOperationTree(ParseState *pstate, SelectStmt *stmt,
 	{
 		Assert(stmt->larg != NULL && stmt->rarg != NULL);
 		if (stmt->sortClause || stmt->limitOffset || stmt->limitCount ||
-			stmt->lockingClause)
+			stmt->lockingClause || stmt->withClause)
 			isLeaf = true;
 		else
 			isLeaf = false;
@@ -1559,7 +1600,7 @@ transformSetOperationTree(ParseState *pstate, SelectStmt *stmt,
 		/* Process leaf SELECT */
 		Query	   *selectQuery;
 		char		selectName[32];
-		RangeTblEntry *rte;
+		RangeTblEntry *rte PG_USED_FOR_ASSERTS_ONLY;
 		RangeTblRef *rtr;
 		ListCell   *tl;
 
@@ -1892,44 +1933,6 @@ determineRecursiveColTypes(ParseState *pstate, Node *larg, List *nrtargetlist)
 	analyzeCTETargetList(pstate, pstate->p_parent_cte, targetList);
 }
 
-/*
- * Attach column names from a ColumnDef list to a TargetEntry list
- * (for CREATE TABLE AS)
- */
-static void
-applyColumnNames(List *dst, List *src)
-{
-	ListCell   *dst_item;
-	ListCell   *src_item;
-
-	src_item = list_head(src);
-
-	foreach(dst_item, dst)
-	{
-		TargetEntry *d = (TargetEntry *) lfirst(dst_item);
-		ColumnDef  *s;
-
-		/* junk targets don't count */
-		if (d->resjunk)
-			continue;
-
-		/* fewer ColumnDefs than target entries is OK */
-		if (src_item == NULL)
-			break;
-
-		s = (ColumnDef *) lfirst(src_item);
-		src_item = lnext(src_item);
-
-		d->resname = pstrdup(s->colname);
-	}
-
-	/* more ColumnDefs than target entries is not OK */
-	if (src_item != NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_SYNTAX_ERROR),
-				 errmsg("CREATE TABLE AS specifies too many column names")));
-}
-
 
 /*
  * transformUpdateStmt -
@@ -2174,14 +2177,6 @@ transformDeclareCursorStmt(ParseState *pstate, DeclareCursorStmt *stmt)
 		result->utilityStmt != NULL)
 		elog(ERROR, "unexpected non-SELECT command in DECLARE CURSOR");
 
-	/* But we must explicitly disallow DECLARE CURSOR ... SELECT INTO */
-	if (result->intoClause)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_CURSOR_DEFINITION),
-				 errmsg("DECLARE CURSOR cannot specify INTO"),
-				 parser_errposition(pstate,
-								exprLocation((Node *) result->intoClause))));
-
 	/*
 	 * We also disallow data-modifying WITH in a cursor.  (This could be
 	 * allowed, but the semantics of when the updates occur might be
@@ -2234,6 +2229,29 @@ transformDeclareCursorStmt(ParseState *pstate, DeclareCursorStmt *stmt)
  */
 static Query *
 transformExplainStmt(ParseState *pstate, ExplainStmt *stmt)
+{
+	Query	   *result;
+
+	/* transform contained query, allowing SELECT INTO */
+	stmt->query = (Node *) transformTopLevelStmt(pstate, stmt->query);
+
+	/* represent the command as a utility Query */
+	result = makeNode(Query);
+	result->commandType = CMD_UTILITY;
+	result->utilityStmt = (Node *) stmt;
+
+	return result;
+}
+
+
+/*
+ * transformCreateTableAsStmt -
+ *	transform a CREATE TABLE AS (or SELECT ... INTO) Statement
+ *
+ * As with EXPLAIN, transform the contained statement now.
+ */
+static Query *
+transformCreateTableAsStmt(ParseState *pstate, CreateTableAsStmt *stmt)
 {
 	Query	   *result;
 

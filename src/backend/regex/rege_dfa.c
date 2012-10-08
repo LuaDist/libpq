@@ -272,36 +272,35 @@ static struct dfa *
 newdfa(struct vars * v,
 	   struct cnfa * cnfa,
 	   struct colormap * cm,
-	   struct smalldfa * small) /* preallocated space, may be NULL */
+	   struct smalldfa * sml)	/* preallocated space, may be NULL */
 {
 	struct dfa *d;
 	size_t		nss = cnfa->nstates * 2;
 	int			wordsper = (cnfa->nstates + UBITS - 1) / UBITS;
-	struct smalldfa *smallwas = small;
+	struct smalldfa *smallwas = sml;
 
 	assert(cnfa != NULL && cnfa->nstates != 0);
 
 	if (nss <= FEWSTATES && cnfa->ncolors <= FEWCOLORS)
 	{
 		assert(wordsper == 1);
-		if (small == NULL)
+		if (sml == NULL)
 		{
-			small = (struct smalldfa *) MALLOC(
-											   sizeof(struct smalldfa));
-			if (small == NULL)
+			sml = (struct smalldfa *) MALLOC(sizeof(struct smalldfa));
+			if (sml == NULL)
 			{
 				ERR(REG_ESPACE);
 				return NULL;
 			}
 		}
-		d = &small->dfa;
-		d->ssets = small->ssets;
-		d->statesarea = small->statesarea;
+		d = &sml->dfa;
+		d->ssets = sml->ssets;
+		d->statesarea = sml->statesarea;
 		d->work = &d->statesarea[nss];
-		d->outsarea = small->outsarea;
-		d->incarea = small->incarea;
+		d->outsarea = sml->outsarea;
+		d->incarea = sml->incarea;
 		d->cptsmalloced = 0;
-		d->mallocarea = (smallwas == NULL) ? (char *) small : NULL;
+		d->mallocarea = (smallwas == NULL) ? (char *) sml : NULL;
 	}
 	else
 	{
@@ -458,14 +457,14 @@ miss(struct vars * v,			/* used only for debug flags */
 	gotstate = 0;
 	for (i = 0; i < d->nstates; i++)
 		if (ISBSET(css->states, i))
-			for (ca = cnfa->states[i] + 1; ca->co != COLORLESS; ca++)
+			for (ca = cnfa->states[i]; ca->co != COLORLESS; ca++)
 				if (ca->co == co)
 				{
 					BSET(d->work, ca->to);
 					gotstate = 1;
 					if (ca->to == cnfa->post)
 						ispost = 1;
-					if (!cnfa->states[ca->to]->co)
+					if (!(cnfa->stflags[ca->to] & CNFA_NOPROGRESS))
 						noprogress = 0;
 					FDEBUG(("%d -> %d\n", i, ca->to));
 				}
@@ -476,10 +475,9 @@ miss(struct vars * v,			/* used only for debug flags */
 		dolacons = 0;
 		for (i = 0; i < d->nstates; i++)
 			if (ISBSET(d->work, i))
-				for (ca = cnfa->states[i] + 1; ca->co != COLORLESS;
-					 ca++)
+				for (ca = cnfa->states[i]; ca->co != COLORLESS; ca++)
 				{
-					if (ca->co <= cnfa->ncolors)
+					if (ca->co < cnfa->ncolors)
 						continue;		/* NOTE CONTINUE */
 					sawlacons = 1;
 					if (ISBSET(d->work, ca->to))
@@ -490,7 +488,7 @@ miss(struct vars * v,			/* used only for debug flags */
 					dolacons = 1;
 					if (ca->to == cnfa->post)
 						ispost = 1;
-					if (!cnfa->states[ca->to]->co)
+					if (!(cnfa->stflags[ca->to] & CNFA_NOPROGRESS))
 						noprogress = 0;
 					FDEBUG(("%d :> %d\n", i, ca->to));
 				}

@@ -3,7 +3,7 @@
  * relcache.c
  *	  POSTGRES relation descriptor cache code
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -30,7 +30,6 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-#include "access/genam.h"
 #include "access/reloptions.h"
 #include "access/sysattr.h"
 #include "access/transam.h"
@@ -61,7 +60,6 @@
 #include "optimizer/prep.h"
 #include "optimizer/var.h"
 #include "rewrite/rewriteDefine.h"
-#include "storage/fd.h"
 #include "storage/lmgr.h"
 #include "storage/smgr.h"
 #include "utils/array.h"
@@ -70,7 +68,6 @@
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
-#include "utils/relcache.h"
 #include "utils/relmapper.h"
 #include "utils/resowner.h"
 #include "utils/syscache.h"
@@ -377,6 +374,7 @@ RelationParseRelOptions(Relation relation, HeapTuple tuple)
 		case RELKIND_RELATION:
 		case RELKIND_TOASTVALUE:
 		case RELKIND_INDEX:
+		case RELKIND_VIEW:
 			break;
 		default:
 			return;
@@ -1417,6 +1415,7 @@ formrdesc(const char *relationName, Oid relationReltype,
 
 	relation->rd_rel->relpages = 0;
 	relation->rd_rel->reltuples = 0;
+	relation->rd_rel->relallvisible = 0;
 	relation->rd_rel->relkind = RELKIND_RELATION;
 	relation->rd_rel->relhasoids = hasoids;
 	relation->rd_rel->relnatts = (int16) natts;
@@ -2406,6 +2405,7 @@ RelationBuildLocalRelation(const char *relname,
 						   Oid relnamespace,
 						   TupleDesc tupDesc,
 						   Oid relid,
+						   Oid relfilenode,
 						   Oid reltablespace,
 						   bool shared_relation,
 						   bool mapped_relation,
@@ -2540,10 +2540,8 @@ RelationBuildLocalRelation(const char *relname,
 
 	/*
 	 * Insert relation physical and logical identifiers (OIDs) into the right
-	 * places.	Note that the physical ID (relfilenode) is initially the same
-	 * as the logical ID (OID); except that for a mapped relation, we set
-	 * relfilenode to zero and rely on RelationInitPhysicalAddr to consult the
-	 * map.
+	 * places.	For a mapped relation, we set relfilenode to zero and rely on
+	 * RelationInitPhysicalAddr to consult the map.
 	 */
 	rel->rd_rel->relisshared = shared_relation;
 
@@ -2558,10 +2556,10 @@ RelationBuildLocalRelation(const char *relname,
 	{
 		rel->rd_rel->relfilenode = InvalidOid;
 		/* Add it to the active mapping information */
-		RelationMapUpdateMap(relid, relid, shared_relation, true);
+		RelationMapUpdateMap(relid, relfilenode, shared_relation, true);
 	}
 	else
-		rel->rd_rel->relfilenode = relid;
+		rel->rd_rel->relfilenode = relfilenode;
 
 	RelationInitLockInfo(rel);	/* see lmgr.c */
 
@@ -2672,6 +2670,7 @@ RelationSetNewRelfilenode(Relation relation, TransactionId freezeXid)
 	{
 		classform->relpages = 0;	/* it's empty until further notice */
 		classform->reltuples = 0;
+		classform->relallvisible = 0;
 	}
 	classform->relfrozenxid = freezeXid;
 
@@ -3262,6 +3261,8 @@ CheckConstraintFetch(Relation relation)
 			elog(ERROR, "unexpected constraint record found for rel %s",
 				 RelationGetRelationName(relation));
 
+		check[found].ccvalid = conform->convalidated;
+		check[found].ccnoinherit = conform->connoinherit;
 		check[found].ccname = MemoryContextStrdup(CacheMemoryContext,
 												  NameStr(conform->conname));
 
@@ -3350,15 +3351,36 @@ RelationGetIndexList(Relation relation)
 	while (HeapTupleIsValid(htup = systable_getnext(indscan)))
 	{
 		Form_pg_index index = (Form_pg_index) GETSTRUCT(htup);
+		Datum		indclassDatum;
+		oidvector  *indclass;
+		bool		isnull;
+
+		/*
+		 * Ignore any indexes that are currently being dropped
+		 */
+		if (!index->indisvalid && !index->indisready)
+			continue;
 
 		/* Add index's OID to result list in the proper order */
 		result = insert_ordered_oid(result, index->indexrelid);
+
+		/*
+		 * indclass cannot be referenced directly through the C struct,
+		 * because it comes after the variable-width indkey field.	Must
+		 * extract the datum the hard way...
+		 */
+		indclassDatum = heap_getattr(htup,
+									 Anum_pg_index_indclass,
+									 GetPgIndexDescriptor(),
+									 &isnull);
+		Assert(!isnull);
+		indclass = (oidvector *) DatumGetPointer(indclassDatum);
 
 		/* Check to see if it is a unique, non-partial btree index on OID */
 		if (index->indnatts == 1 &&
 			index->indisunique && index->indimmediate &&
 			index->indkey.values[0] == ObjectIdAttributeNumber &&
-			index->indclass.values[0] == OID_BTREE_OPS_OID &&
+			indclass->values[0] == OID_BTREE_OPS_OID &&
 			heap_attisnull(htup, Anum_pg_index_indpred))
 			oidIndex = index->indexrelid;
 	}
@@ -3687,10 +3709,10 @@ RelationGetIndexAttrBitmap(Relation relation)
 		}
 
 		/* Collect all attributes used in expressions, too */
-		pull_varattnos((Node *) indexInfo->ii_Expressions, &indexattrs);
+		pull_varattnos((Node *) indexInfo->ii_Expressions, 1, &indexattrs);
 
 		/* Collect all attributes in the index predicate, too */
-		pull_varattnos((Node *) indexInfo->ii_Predicate, &indexattrs);
+		pull_varattnos((Node *) indexInfo->ii_Predicate, 1, &indexattrs);
 
 		index_close(indexDesc, AccessShareLock);
 	}
@@ -4492,8 +4514,8 @@ RelationCacheInitFilePreInvalidate(void)
 		/*
 		 * The file might not be there if no backend has been started since
 		 * the last removal.  But complain about failures other than ENOENT.
-		 * Fortunately, it's not too late to abort the transaction if we
-		 * can't get rid of the would-be-obsolete init file.
+		 * Fortunately, it's not too late to abort the transaction if we can't
+		 * get rid of the would-be-obsolete init file.
 		 */
 		if (errno != ENOENT)
 			ereport(ERROR,

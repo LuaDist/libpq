@@ -34,7 +34,8 @@
  * WaitLatch	- Waits for the latch to become set
  *
  * WaitLatch includes a provision for timeouts (which should hopefully not
- * be necessary once the code is fully latch-ified).
+ * be necessary once the code is fully latch-ified) and a provision for
+ * postmaster child processes to wake up immediately on postmaster death.
  * See unix_latch.c for detailed specifications for the exported functions.
  *
  * The correct pattern to wait for event(s) is:
@@ -63,8 +64,17 @@
  * will be lifted in future by inserting suitable memory barriers into
  * SetLatch and ResetLatch.
  *
+ * Note that use of the process latch (PGPROC.procLatch) is generally better
+ * than an ad-hoc shared latch for signaling auxiliary processes.  This is
+ * because generic signal handlers will call SetLatch on the process latch
+ * only, so using any latch other than the process latch effectively precludes
+ * ever registering a generic handler.	Since signals have the potential to
+ * invalidate the latch timeout on some platforms, resulting in a
+ * denial-of-service, it is important to verify that all signal handlers
+ * within all WaitLatch-calling processes call SetLatch.
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ *
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/storage/latch.h
@@ -91,6 +101,13 @@ typedef struct
 #endif
 } Latch;
 
+/* Bitmasks for events that may wake-up WaitLatch() clients */
+#define WL_LATCH_SET		 (1 << 0)
+#define WL_SOCKET_READABLE	 (1 << 1)
+#define WL_SOCKET_WRITEABLE  (1 << 2)
+#define WL_TIMEOUT			 (1 << 3)
+#define WL_POSTMASTER_DEATH  (1 << 4)
+
 /*
  * prototypes for functions in latch.c
  */
@@ -98,9 +115,9 @@ extern void InitLatch(volatile Latch *latch);
 extern void InitSharedLatch(volatile Latch *latch);
 extern void OwnLatch(volatile Latch *latch);
 extern void DisownLatch(volatile Latch *latch);
-extern bool WaitLatch(volatile Latch *latch, long timeout);
-extern int WaitLatchOrSocket(volatile Latch *latch, pgsocket sock,
-				  bool forRead, bool forWrite, long timeout);
+extern int	WaitLatch(volatile Latch *latch, int wakeEvents, long timeout);
+extern int WaitLatchOrSocket(volatile Latch *latch, int wakeEvents,
+				  pgsocket sock, long timeout);
 extern void SetLatch(volatile Latch *latch);
 extern void ResetLatch(volatile Latch *latch);
 

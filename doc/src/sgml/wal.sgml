@@ -73,7 +73,7 @@
       <para>
         On <productname>Linux</>, IDE drives can be queried using
         <command>hdparm -I</command>; write caching is enabled if there is
-        a <literal>*</> next to <literal>Write cache</>.  <command>hdparm -W</>
+        a <literal>*</> next to <literal>Write cache</>.  <command>hdparm -W 0</>
         can be used to turn off write caching.  SCSI drives can be queried
         using <ulink url="http://sg.danny.cz/sg/sdparm.html"><application>sdparm</></ulink>.
         Use <command>sdparm --get=WCE</command> to check
@@ -87,7 +87,9 @@
         On <productname>FreeBSD</>, IDE drives can be queried using
         <command>atacontrol</command> and write caching turned off using
         <literal>hw.ata.wc=0</> in <filename>/boot/loader.conf</>;
-        SCSI drives use <command>sdparm</command>.
+        SCSI drives can be queried using <command>camcontrol identify</command>,
+        and the write cache both queried and changed using
+        <command>sdparm</command> when available.
       </para>
     </listitem>
 
@@ -376,7 +378,7 @@
    committing at about the same time.  Setting <varname>commit_delay</varname>
    can only help when there are many concurrently committing transactions,
    and it is difficult to tune it to a value that actually helps rather
-   than hurt throughput.
+   than hurts throughput.
   </para>
 
  </sect1>
@@ -417,13 +419,18 @@
   </para>
 
   <para>
-   The server's background writer process automatically performs
+   The server's checkpointer process automatically performs
    a checkpoint every so often.  A checkpoint is created every <xref
    linkend="guc-checkpoint-segments"> log segments, or every <xref
    linkend="guc-checkpoint-timeout"> seconds, whichever comes first.
    The default settings are 3 segments and 300 seconds (5 minutes), respectively.
-   It is also possible to force a checkpoint by using the SQL command
-   <command>CHECKPOINT</command>.
+   In cases where no WAL has been written since the previous checkpoint, new 
+   checkpoints will be skipped even if checkpoint_timeout has passed.  
+   If WAL archiving is being used and you want to put a lower limit on
+   how often files are archived in order to bound potential data
+   loss, you should adjust archive_timeout parameter rather than the checkpoint
+   parameters.  It is also possible to force a checkpoint by using the SQL
+   command <command>CHECKPOINT</command>.
   </para>
 
   <para>
@@ -538,9 +545,7 @@
    from having to do writes.  On such systems
    one should increase the number of <acronym>WAL</acronym> buffers by
    modifying the configuration parameter <xref
-   linkend="guc-wal-buffers">.  The default number of <acronym>WAL</acronym>
-   buffers is 8.  Increasing this value will
-   correspondingly increase shared memory usage.  When
+   linkend="guc-wal-buffers">.  When
    <xref linkend="guc-full-page-writes"> is set and the system is very busy,
    setting this value higher will help smooth response times during the
    period immediately following each checkpoint.

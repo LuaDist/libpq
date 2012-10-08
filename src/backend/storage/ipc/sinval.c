@@ -3,7 +3,7 @@
  * sinval.c
  *	  POSTGRES shared cache invalidation communication code.
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -20,6 +20,9 @@
 #include "storage/ipc.h"
 #include "storage/sinvaladt.h"
 #include "utils/inval.h"
+
+
+uint64		SharedInvalidMessageCounter;
 
 
 /*
@@ -90,6 +93,7 @@ ReceiveSharedInvalidMessages(
 	{
 		SharedInvalidationMessage *msg = &messages[nextmsg++];
 
+		SharedInvalidMessageCounter++;
 		invalFunction(msg);
 	}
 
@@ -106,6 +110,7 @@ ReceiveSharedInvalidMessages(
 		{
 			/* got a reset message */
 			elog(DEBUG4, "cache state reset");
+			SharedInvalidMessageCounter++;
 			resetFunction();
 			break;				/* nothing more to do */
 		}
@@ -118,6 +123,7 @@ ReceiveSharedInvalidMessages(
 		{
 			SharedInvalidationMessage *msg = &messages[nextmsg++];
 
+			SharedInvalidMessageCounter++;
 			invalFunction(msg);
 		}
 

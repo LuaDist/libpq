@@ -141,6 +141,27 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
+      <term><option>-C <replaceable>name</replaceable></option></term>
+      <listitem>
+       <para>
+        Prints the value of the named run-time parameter, and exits.
+        (See the <option>-c</> option above for details.)  This can
+        be used on a running server, and returns values from
+        <filename>postgresql.conf</>, modified by any parameters
+        supplied in this invocation.  It does not reflect parameters
+        supplied when the cluster was started.
+       </para>
+
+       <para>
+        This option is meant for other programs that interact with a server
+        instance, such as <xref linkend="app-pg-ctl">, to query configuration
+        parameter values.  User-facing applications should instead use <xref
+        linkend="sql-show"> or the <structname>pg_settings</structname> view.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
       <term><option>-d <replaceable>debug-level</replaceable></option></term>
       <listitem>
        <para>
@@ -325,6 +346,16 @@ PostgreSQL documentation
      </varlistentry>
 
      <varlistentry>
+      <term><option>-V</></term>
+      <term><option>--version</></term>
+      <listitem>
+       <para>
+        Print the <application>postgres</application> version and exit.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
       <term><option>--<replaceable>name</replaceable>=<replaceable>value</replaceable></option></term>
       <listitem>
        <para>
@@ -341,6 +372,17 @@ PostgreSQL documentation
         This option dumps out the server's internal configuration variables,
         descriptions, and defaults in tab-delimited <command>COPY</> format.
         It is designed primarily for use by administration tools.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><option>-?</></term>
+      <term><option>--help</></term>
+      <listitem>
+       <para>
+        Show help about <application>postgres</application> command line
+        arguments, and exit.
        </para>
       </listitem>
      </varlistentry>
@@ -362,12 +404,15 @@ PostgreSQL documentation
 
     <variablelist>
      <varlistentry>
-      <term><option>-f</option> <literal>{ s | i | m | n | h }</literal></term>
+      <term><option>-f</option> <literal>{ s | i | o | b | t | n | m | h }</literal></term>
       <listitem>
        <para>
         Forbids the use of particular scan and join methods:
         <literal>s</literal> and <literal>i</literal>
-        disable sequential and index scans respectively, while
+        disable sequential and index scans respectively,
+        <literal>o</literal>, <literal>b</literal> and <literal>t</literal>
+        disable index-only scans, bitmap index scans, and TID scans
+        respectively, while
         <literal>n</literal>, <literal>m</literal>, and <literal>h</literal>
         disable nested-loop, merge and hash joins respectively.
        </para>

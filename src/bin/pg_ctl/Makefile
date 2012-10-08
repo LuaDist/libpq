@@ -2,7 +2,7 @@
 #
 # Makefile for src/bin/pg_ctl
 #
-# Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+# Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
 # Portions Copyright (c) 1994, Regents of the University of California
 #
 # src/bin/pg_ctl/Makefile
@@ -16,7 +16,7 @@ subdir = src/bin/pg_ctl
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global
 
-override CPPFLAGS := -DDEF_PGPORT=$(DEF_PGPORT) -I$(libpq_srcdir) $(CPPFLAGS)
+override CPPFLAGS := -I$(libpq_srcdir) $(CPPFLAGS)
 
 OBJS=	pg_ctl.o $(WIN32RES)
 
@@ -36,7 +36,3 @@ uninstall:
 
 clean distclean maintainer-clean:
 	rm -f pg_ctl$(X) $(OBJS)
-
-
-# ensure that changes in DEF_PGPORT propagate into object file
-pg_ctl.o: pg_ctl.c $(top_builddir)/src/Makefile.global

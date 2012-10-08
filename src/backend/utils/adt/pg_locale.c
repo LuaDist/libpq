@@ -2,7 +2,7 @@
  *
  * PostgreSQL locale utilities
  *
- * Portions Copyright (c) 2002-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2002-2012, PostgreSQL Global Development Group
  *
  * src/backend/utils/adt/pg_locale.c
  *
@@ -222,29 +222,43 @@ pg_perm_setlocale(int category, const char *locale)
 
 /*
  * Is the locale name valid for the locale category?
+ *
+ * If successful, and canonname isn't NULL, a palloc'd copy of the locale's
+ * canonical name is stored there.	This is especially useful for figuring out
+ * what locale name "" means (ie, the server environment value).  (Actually,
+ * it seems that on most implementations that's the only thing it's good for;
+ * we could wish that setlocale gave back a canonically spelled version of
+ * the locale name, but typically it doesn't.)
  */
 bool
-check_locale(int category, const char *value)
+check_locale(int category, const char *locale, char **canonname)
 {
 	char	   *save;
-	bool		ret;
+	char	   *res;
+
+	if (canonname)
+		*canonname = NULL;		/* in case of failure */
 
 	save = setlocale(category, NULL);
 	if (!save)
 		return false;			/* won't happen, we hope */
 
-	/* save may be pointing at a modifiable scratch variable, see above */
+	/* save may be pointing at a modifiable scratch variable, see above. */
 	save = pstrdup(save);
 
 	/* set the locale with setlocale, to see if it accepts it. */
-	ret = (setlocale(category, value) != NULL);
+	res = setlocale(category, locale);
+
+	/* save canonical name if requested. */
+	if (res && canonname)
+		*canonname = pstrdup(res);
 
 	/* restore old value. */
 	if (!setlocale(category, save))
-		elog(WARNING, "failed to restore old locale");
+		elog(WARNING, "failed to restore old locale \"%s\"", save);
 	pfree(save);
 
-	return ret;
+	return (res != NULL);
 }
 
 
@@ -262,7 +276,7 @@ check_locale(int category, const char *value)
 bool
 check_locale_monetary(char **newval, void **extra, GucSource source)
 {
-	return check_locale(LC_MONETARY, *newval);
+	return check_locale(LC_MONETARY, *newval, NULL);
 }
 
 void
@@ -274,7 +288,7 @@ assign_locale_monetary(const char *newval, void *extra)
 bool
 check_locale_numeric(char **newval, void **extra, GucSource source)
 {
-	return check_locale(LC_NUMERIC, *newval);
+	return check_locale(LC_NUMERIC, *newval, NULL);
 }
 
 void
@@ -286,7 +300,7 @@ assign_locale_numeric(const char *newval, void *extra)
 bool
 check_locale_time(char **newval, void **extra, GucSource source)
 {
-	return check_locale(LC_TIME, *newval);
+	return check_locale(LC_TIME, *newval, NULL);
 }
 
 void
@@ -322,7 +336,7 @@ check_locale_messages(char **newval, void **extra, GucSource source)
 	 * On Windows, we can't even check the value, so accept blindly
 	 */
 #if defined(LC_MESSAGES) && !defined(WIN32)
-	return check_locale(LC_MESSAGES, *newval);
+	return check_locale(LC_MESSAGES, *newval, NULL);
 #else
 	return true;
 #endif
@@ -564,7 +578,7 @@ strftime_win32(char *dst, size_t dstlen, const wchar_t *format, const struct tm 
 	len = WideCharToMultiByte(CP_UTF8, 0, wbuf, len, dst, dstlen, NULL, NULL);
 	if (len == 0)
 		elog(ERROR,
-			 "could not convert string to UTF-8:error %lu", GetLastError());
+		"could not convert string to UTF-8: error code %lu", GetLastError());
 
 	dst[len] = '\0';
 	if (encoding != PG_UTF8)
@@ -956,7 +970,7 @@ report_newlocale_failure(const char *localename)
 			  errdetail("The operating system could not find any locale data for the locale name \"%s\".",
 						localename) : 0)));
 }
-#endif /* HAVE_LOCALE_T */
+#endif   /* HAVE_LOCALE_T */
 
 
 /*
@@ -1191,17 +1205,17 @@ char2wchar(wchar_t *to, size_t tolen, const char *from, size_t fromlen,
 		else
 		{
 #ifdef HAVE_LOCALE_T
-#ifdef HAVE_WCSTOMBS_L
+#ifdef HAVE_MBSTOWCS_L
 			/* Use mbstowcs_l for nondefault locales */
 			result = mbstowcs_l(to, str, tolen, locale);
-#else							/* !HAVE_WCSTOMBS_L */
+#else							/* !HAVE_MBSTOWCS_L */
 			/* We have to temporarily set the locale as current ... ugh */
 			locale_t	save_locale = uselocale(locale);
 
 			result = mbstowcs(to, str, tolen);
 
 			uselocale(save_locale);
-#endif   /* HAVE_WCSTOMBS_L */
+#endif   /* HAVE_MBSTOWCS_L */
 #else							/* !HAVE_LOCALE_T */
 			/* Can't have locale != 0 without HAVE_LOCALE_T */
 			elog(ERROR, "mbstowcs_l is not available");

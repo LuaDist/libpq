@@ -7,7 +7,7 @@
  * detection and resolution algorithms.
  *
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -450,6 +450,7 @@ FindLockCycleRecurse(PGPROC *checkProc,
 					 int *nSoftEdges)	/* output argument */
 {
 	PGPROC	   *proc;
+	PGXACT	   *pgxact;
 	LOCK	   *lock;
 	PROCLOCK   *proclock;
 	SHM_QUEUE  *procLocks;
@@ -516,6 +517,7 @@ FindLockCycleRecurse(PGPROC *checkProc,
 	while (proclock)
 	{
 		proc = proclock->tag.myProc;
+		pgxact = &ProcGlobal->allPgXact[proc->pgprocno];
 
 		/* A proc never blocks itself */
 		if (proc != checkProc)
@@ -525,25 +527,6 @@ FindLockCycleRecurse(PGPROC *checkProc,
 				if ((proclock->holdMask & LOCKBIT_ON(lm)) &&
 					(conflictMask & LOCKBIT_ON(lm)))
 				{
-					/*
-					 * Look for a blocking autovacuum. There can be more than
-					 * one in the deadlock cycle, in which case we just pick a
-					 * random one.	We stash the autovacuum worker's PGPROC so
-					 * that the caller can send a cancel signal to it, if
-					 * appropriate.
-					 *
-					 * Note we read vacuumFlags without any locking.  This is
-					 * OK only for checking the PROC_IS_AUTOVACUUM flag,
-					 * because that flag is set at process start and never
-					 * reset; there is logic elsewhere to avoid canceling an
-					 * autovacuum that is working for preventing Xid
-					 * wraparound problems (which needs to read a different
-					 * vacuumFlag bit), but we don't do that here to avoid
-					 * grabbing ProcArrayLock.
-					 */
-					if (proc->vacuumFlags & PROC_IS_AUTOVACUUM)
-						blocking_autovacuum_proc = proc;
-
 					/* This proc hard-blocks checkProc */
 					if (FindLockCycleRecurse(proc, depth + 1,
 											 softEdges, nSoftEdges))
@@ -557,7 +540,34 @@ FindLockCycleRecurse(PGPROC *checkProc,
 
 						return true;
 					}
-					/* If no deadlock, we're done looking at this proclock */
+
+					/*
+					 * No deadlock here, but see if this proc is an autovacuum
+					 * that is directly hard-blocking our own proc.  If so,
+					 * report it so that the caller can send a cancel signal
+					 * to it, if appropriate.  If there's more than one such
+					 * proc, it's indeterminate which one will be reported.
+					 *
+					 * We don't touch autovacuums that are indirectly blocking
+					 * us; it's up to the direct blockee to take action.  This
+					 * rule simplifies understanding the behavior and ensures
+					 * that an autovacuum won't be canceled with less than
+					 * deadlock_timeout grace period.
+					 *
+					 * Note we read vacuumFlags without any locking.  This is
+					 * OK only for checking the PROC_IS_AUTOVACUUM flag,
+					 * because that flag is set at process start and never
+					 * reset.  There is logic elsewhere to avoid canceling an
+					 * autovacuum that is working to prevent XID wraparound
+					 * problems (which needs to read a different vacuumFlag
+					 * bit), but we don't do that here to avoid grabbing
+					 * ProcArrayLock.
+					 */
+					if (checkProc == MyProc &&
+						pgxact->vacuumFlags & PROC_IS_AUTOVACUUM)
+						blocking_autovacuum_proc = proc;
+
+					/* We're done looking at this proclock */
 					break;
 				}
 			}
@@ -935,6 +945,8 @@ DeadLockReport(void)
 						 info->pid,
 					  pgstat_get_backend_current_activity(info->pid, false));
 	}
+
+	pgstat_report_deadlock();
 
 	ereport(ERROR,
 			(errcode(ERRCODE_T_R_DEADLOCK_DETECTED),

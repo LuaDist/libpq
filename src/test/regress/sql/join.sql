@@ -330,6 +330,8 @@ on (x1 = xx1) where (xx2 is not null);
 -- regression test: check for bug with propagation of implied equality
 -- to outside an IN
 --
+analyze tenk1;		-- ensure we get consistent plans here
+
 select count(*) from tenk1 a where unique1 in
   (select unique1 from tenk1 b join tenk1 c using (unique1)
    where b.unique2 = 42);
@@ -640,10 +642,112 @@ LEFT JOIN
 ON sub1.key1 = sub2.key3;
 
 --
+-- test case where a PlaceHolderVar is used as a nestloop parameter
+--
+
+EXPLAIN (COSTS OFF)
+SELECT qq, unique1
+  FROM
+  ( SELECT COALESCE(q1, 0) AS qq FROM int8_tbl a ) AS ss1
+  FULL OUTER JOIN
+  ( SELECT COALESCE(q2, -1) AS qq FROM int8_tbl b ) AS ss2
+  USING (qq)
+  INNER JOIN tenk1 c ON qq = unique2;
+
+SELECT qq, unique1
+  FROM
+  ( SELECT COALESCE(q1, 0) AS qq FROM int8_tbl a ) AS ss1
+  FULL OUTER JOIN
+  ( SELECT COALESCE(q2, -1) AS qq FROM int8_tbl b ) AS ss2
+  USING (qq)
+  INNER JOIN tenk1 c ON qq = unique2;
+
+--
+-- test case where a PlaceHolderVar is propagated into a subquery
+--
+
+explain (costs off)
+select * from
+  int8_tbl t1 left join
+  (select q1 as x, 42 as y from int8_tbl t2) ss
+  on t1.q2 = ss.x
+where
+  1 = (select 1 from int8_tbl t3 where ss.y is not null limit 1)
+order by 1,2;
+
+select * from
+  int8_tbl t1 left join
+  (select q1 as x, 42 as y from int8_tbl t2) ss
+  on t1.q2 = ss.x
+where
+  1 = (select 1 from int8_tbl t3 where ss.y is not null limit 1)
+order by 1,2;
+
+--
 -- test the corner cases FULL JOIN ON TRUE and FULL JOIN ON FALSE
 --
 select * from int4_tbl a full join int4_tbl b on true;
 select * from int4_tbl a full join int4_tbl b on false;
+
+--
+-- test for ability to use a cartesian join when necessary
+--
+
+explain (costs off)
+select * from
+  tenk1 join int4_tbl on f1 = twothousand,
+  int4(sin(1)) q1,
+  int4(sin(0)) q2
+where q1 = thousand or q2 = thousand;
+
+explain (costs off)
+select * from
+  tenk1 join int4_tbl on f1 = twothousand,
+  int4(sin(1)) q1,
+  int4(sin(0)) q2
+where thousand = (q1 + q2);
+
+--
+-- test placement of movable quals in a parameterized join tree
+--
+
+explain (costs off)
+select * from tenk1 t1 left join
+  (tenk1 t2 join tenk1 t3 on t2.thousand = t3.unique2)
+  on t1.hundred = t2.hundred and t1.ten = t3.ten
+where t1.unique1 = 1;
+
+explain (costs off)
+select * from tenk1 t1 left join
+  (tenk1 t2 join tenk1 t3 on t2.thousand = t3.unique2)
+  on t1.hundred = t2.hundred and t1.ten + t2.ten = t3.ten
+where t1.unique1 = 1;
+
+explain (costs off)
+select count(*) from
+  tenk1 a join tenk1 b on a.unique1 = b.unique2
+  left join tenk1 c on a.unique2 = b.unique1 and c.thousand = a.thousand
+  join int4_tbl on b.thousand = f1;
+
+select count(*) from
+  tenk1 a join tenk1 b on a.unique1 = b.unique2
+  left join tenk1 c on a.unique2 = b.unique1 and c.thousand = a.thousand
+  join int4_tbl on b.thousand = f1;
+
+explain (costs off)
+select b.unique1 from
+  tenk1 a join tenk1 b on a.unique1 = b.unique2
+  left join tenk1 c on b.unique1 = 42 and c.thousand = a.thousand
+  join int4_tbl i1 on b.thousand = f1
+  right join int4_tbl i2 on i2.f1 = b.tenthous
+  order by 1;
+
+select b.unique1 from
+  tenk1 a join tenk1 b on a.unique1 = b.unique2
+  left join tenk1 c on b.unique1 = 42 and c.thousand = a.thousand
+  join int4_tbl i1 on b.thousand = f1
+  right join int4_tbl i2 on i2.f1 = b.tenthous
+  order by 1;
 
 --
 -- test join removal

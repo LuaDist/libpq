@@ -3,7 +3,7 @@
  * pg_dump.h
  *	  Common header file for the pg_dump utility
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/bin/pg_dump/pg_dump.h
@@ -97,6 +97,7 @@ typedef enum
 	DO_OPERATOR,
 	DO_OPCLASS,
 	DO_OPFAMILY,
+	DO_COLLATION,
 	DO_CONVERSION,
 	DO_TABLE,
 	DO_ATTRDEF,
@@ -118,7 +119,8 @@ typedef enum
 	DO_DEFAULT_ACL,
 	DO_BLOB,
 	DO_BLOB_DATA,
-	DO_COLLATION
+	DO_PRE_DATA_BOUNDARY,
+	DO_POST_DATA_BOUNDARY
 } DumpableObjectType;
 
 typedef struct _dumpableObject
@@ -203,6 +205,7 @@ typedef struct _oprInfo
 {
 	DumpableObject dobj;
 	char	   *rolname;
+	char		oprkind;
 	Oid			oprcode;
 } OprInfo;
 
@@ -275,17 +278,10 @@ typedef struct _tableInfo
 	bool	   *attislocal;		/* true if attr has local definition */
 	char	  **attoptions;		/* per-attribute options */
 	Oid		   *attcollation;	/* per-attribute collation selection */
-
-	/*
-	 * Note: we need to store per-attribute notnull, default, and constraint
-	 * stuff for all interesting tables so that we can tell which constraints
-	 * were inherited.
-	 */
-	bool	   *notnull;		/* Not null constraints on attributes */
-	struct _attrDefInfo **attrdefs;		/* DEFAULT expressions */
-	bool	   *inhAttrs;		/* true if each attribute is inherited */
-	bool	   *inhAttrDef;		/* true if attr's default is inherited */
+	char	  **attfdwoptions;	/* per-attribute fdw options */
+	bool	   *notnull;		/* NOT NULL constraints on attributes */
 	bool	   *inhNotNull;		/* true if NOT NULL is inherited */
+	struct _attrDefInfo **attrdefs;		/* DEFAULT expressions */
 	struct _constraintInfo *checkexprs; /* CHECK constraints */
 
 	/*
@@ -298,7 +294,7 @@ typedef struct _tableInfo
 
 typedef struct _attrDefInfo
 {
-	DumpableObject dobj;
+	DumpableObject dobj;		/* note: dobj.name is name of table */
 	TableInfo  *adtable;		/* link to table of attribute */
 	int			adnum;
 	char	   *adef_expr;		/* decompiled DEFAULT expression */
@@ -336,6 +332,8 @@ typedef struct _ruleInfo
 	char		ev_enabled;
 	bool		separate;		/* TRUE if must dump as separate item */
 	/* separate is always true for non-ON SELECT rules */
+	char	   *reloptions;		/* options specified by WITH (...) */
+	/* reloptions is only set if we need to dump the options with the rule */
 } RuleInfo;
 
 typedef struct _triggerInfo
@@ -489,7 +487,10 @@ extern char g_opaque_type[10];	/* name for the opaque type */
  *	common utility functions
  */
 
-extern TableInfo *getSchemaData(int *numTablesPtr);
+struct Archive;
+typedef struct Archive Archive;
+
+extern TableInfo *getSchemaData(Archive *, int *numTablesPtr);
 
 typedef enum _OidOptions
 {
@@ -514,55 +515,54 @@ extern TypeInfo *findTypeByOid(Oid oid);
 extern FuncInfo *findFuncByOid(Oid oid);
 extern OprInfo *findOprByOid(Oid oid);
 extern CollInfo *findCollationByOid(Oid oid);
+extern NamespaceInfo *findNamespaceByOid(Oid oid);
 
 extern void simple_oid_list_append(SimpleOidList *list, Oid val);
 extern void simple_string_list_append(SimpleStringList *list, const char *val);
 extern bool simple_oid_list_member(SimpleOidList *list, Oid val);
 extern bool simple_string_list_member(SimpleStringList *list, const char *val);
 
-extern char *pg_strdup(const char *string);
-extern void *pg_malloc(size_t size);
-extern void *pg_calloc(size_t nmemb, size_t size);
-extern void *pg_realloc(void *ptr, size_t size);
-
-extern void check_conn_and_db(void);
-extern void exit_nicely(void);
-
 extern void parseOidArray(const char *str, Oid *array, int arraysize);
 
-extern void sortDumpableObjects(DumpableObject **objs, int numObjs);
+extern void sortDumpableObjects(DumpableObject **objs, int numObjs,
+					DumpId preBoundaryId, DumpId postBoundaryId);
 extern void sortDumpableObjectsByTypeName(DumpableObject **objs, int numObjs);
 extern void sortDumpableObjectsByTypeOid(DumpableObject **objs, int numObjs);
 
 /*
  * version specific routines
  */
-extern NamespaceInfo *getNamespaces(int *numNamespaces);
-extern ExtensionInfo *getExtensions(int *numExtensions);
-extern TypeInfo *getTypes(int *numTypes);
-extern FuncInfo *getFuncs(int *numFuncs);
-extern AggInfo *getAggregates(int *numAggregates);
-extern OprInfo *getOperators(int *numOperators);
-extern OpclassInfo *getOpclasses(int *numOpclasses);
-extern OpfamilyInfo *getOpfamilies(int *numOpfamilies);
-extern CollInfo *getCollations(int *numCollations);
-extern ConvInfo *getConversions(int *numConversions);
-extern TableInfo *getTables(int *numTables);
-extern InhInfo *getInherits(int *numInherits);
-extern void getIndexes(TableInfo tblinfo[], int numTables);
-extern void getConstraints(TableInfo tblinfo[], int numTables);
-extern RuleInfo *getRules(int *numRules);
-extern void getTriggers(TableInfo tblinfo[], int numTables);
-extern ProcLangInfo *getProcLangs(int *numProcLangs);
-extern CastInfo *getCasts(int *numCasts);
-extern void getTableAttrs(TableInfo *tbinfo, int numTables);
-extern TSParserInfo *getTSParsers(int *numTSParsers);
-extern TSDictInfo *getTSDictionaries(int *numTSDicts);
-extern TSTemplateInfo *getTSTemplates(int *numTSTemplates);
-extern TSConfigInfo *getTSConfigurations(int *numTSConfigs);
-extern FdwInfo *getForeignDataWrappers(int *numForeignDataWrappers);
-extern ForeignServerInfo *getForeignServers(int *numForeignServers);
-extern DefaultACLInfo *getDefaultACLs(int *numDefaultACLs);
-extern void getExtensionMembership(ExtensionInfo extinfo[], int numExtensions);
+extern NamespaceInfo *getNamespaces(Archive *fout, int *numNamespaces);
+extern ExtensionInfo *getExtensions(Archive *fout, int *numExtensions);
+extern TypeInfo *getTypes(Archive *fout, int *numTypes);
+extern FuncInfo *getFuncs(Archive *fout, int *numFuncs);
+extern AggInfo *getAggregates(Archive *fout, int *numAggregates);
+extern OprInfo *getOperators(Archive *fout, int *numOperators);
+extern OpclassInfo *getOpclasses(Archive *fout, int *numOpclasses);
+extern OpfamilyInfo *getOpfamilies(Archive *fout, int *numOpfamilies);
+extern CollInfo *getCollations(Archive *fout, int *numCollations);
+extern ConvInfo *getConversions(Archive *fout, int *numConversions);
+extern TableInfo *getTables(Archive *fout, int *numTables);
+extern void getOwnedSeqs(Archive *fout, TableInfo tblinfo[], int numTables);
+extern InhInfo *getInherits(Archive *fout, int *numInherits);
+extern void getIndexes(Archive *fout, TableInfo tblinfo[], int numTables);
+extern void getConstraints(Archive *fout, TableInfo tblinfo[], int numTables);
+extern RuleInfo *getRules(Archive *fout, int *numRules);
+extern void getTriggers(Archive *fout, TableInfo tblinfo[], int numTables);
+extern ProcLangInfo *getProcLangs(Archive *fout, int *numProcLangs);
+extern CastInfo *getCasts(Archive *fout, int *numCasts);
+extern void getTableAttrs(Archive *fout, TableInfo *tbinfo, int numTables);
+extern bool shouldPrintColumn(TableInfo *tbinfo, int colno);
+extern TSParserInfo *getTSParsers(Archive *fout, int *numTSParsers);
+extern TSDictInfo *getTSDictionaries(Archive *fout, int *numTSDicts);
+extern TSTemplateInfo *getTSTemplates(Archive *fout, int *numTSTemplates);
+extern TSConfigInfo *getTSConfigurations(Archive *fout, int *numTSConfigs);
+extern FdwInfo *getForeignDataWrappers(Archive *fout,
+					   int *numForeignDataWrappers);
+extern ForeignServerInfo *getForeignServers(Archive *fout,
+				  int *numForeignServers);
+extern DefaultACLInfo *getDefaultACLs(Archive *fout, int *numDefaultACLs);
+extern void getExtensionMembership(Archive *fout, ExtensionInfo extinfo[],
+					   int numExtensions);
 
 #endif   /* PG_DUMP_H */

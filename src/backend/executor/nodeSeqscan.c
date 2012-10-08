@@ -3,7 +3,7 @@
  * nodeSeqscan.c
  *	  Support routines for sequential scans of relations.
  *
- * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2012, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -24,10 +24,10 @@
  */
 #include "postgres.h"
 
-#include "access/heapam.h"
 #include "access/relscan.h"
 #include "executor/execdebug.h"
 #include "executor/nodeSeqscan.h"
+#include "utils/rel.h"
 
 static void InitScanRelation(SeqScanState *node, EState *estate);
 static TupleTableSlot *SeqNext(SeqScanState *node);

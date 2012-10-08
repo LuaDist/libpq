@@ -3,12 +3,15 @@
  *
  *	dump functions
  *
- *	Copyright (c) 2010-2011, PostgreSQL Global Development Group
+ *	Copyright (c) 2010-2012, PostgreSQL Global Development Group
  *	contrib/pg_upgrade/dump.c
  */
 
+#include "postgres.h"
+
 #include "pg_upgrade.h"
 
+#include <sys/types.h>
 
 void
 generate_old_dump(void)
@@ -20,10 +23,11 @@ generate_old_dump(void)
 	 * --binary-upgrade records the width of dropped columns in pg_class, and
 	 * restores the frozenid's for databases and relations.
 	 */
-	exec_prog(true,
-			  SYSTEMQUOTE "\"%s/pg_dumpall\" --port %d --username \"%s\" "
-			  "--schema-only --binary-upgrade > \"%s/" ALL_DUMP_FILE "\""
-			  SYSTEMQUOTE, new_cluster.bindir, old_cluster.port, os_info.user, os_info.cwd);
+	exec_prog(UTILITY_LOG_FILE, NULL, true,
+			  "\"%s/pg_dumpall\" %s --schema-only --binary-upgrade %s -f %s",
+			  new_cluster.bindir, cluster_conn_opts(&old_cluster),
+			  log_opts.verbose ? "--verbose" : "",
+			  ALL_DUMP_FILE);
 	check_ok();
 }
 
@@ -54,15 +58,22 @@ split_old_dump(void)
 	char		filename[MAXPGPATH];
 	bool		suppressed_username = false;
 
-	snprintf(filename, sizeof(filename), "%s/%s", os_info.cwd, ALL_DUMP_FILE);
-	if ((all_dump = fopen(filename, "r")) == NULL)
-		pg_log(PG_FATAL, "Cannot open dump file %s\n", filename);
-	snprintf(filename, sizeof(filename), "%s/%s", os_info.cwd, GLOBALS_DUMP_FILE);
-	if ((globals_dump = fopen(filename, "w")) == NULL)
-		pg_log(PG_FATAL, "Cannot write to dump file %s\n", filename);
-	snprintf(filename, sizeof(filename), "%s/%s", os_info.cwd, DB_DUMP_FILE);
-	if ((db_dump = fopen(filename, "w")) == NULL)
-		pg_log(PG_FATAL, "Cannot write to dump file %s\n", filename);
+
+	/* 
+	 * Open all files in binary mode to avoid line end translation on Windows,
+	 * boths for input and output.
+	 */
+
+	snprintf(filename, sizeof(filename), "%s", ALL_DUMP_FILE);
+	if ((all_dump = fopen(filename, PG_BINARY_R)) == NULL)
+		pg_log(PG_FATAL, "Could not open dump file \"%s\": %s\n", filename, getErrorText(errno));
+	snprintf(filename, sizeof(filename), "%s", GLOBALS_DUMP_FILE);
+	if ((globals_dump = fopen_priv(filename, PG_BINARY_W)) == NULL)
+		pg_log(PG_FATAL, "Could not write to dump file \"%s\": %s\n", filename, getErrorText(errno));
+	snprintf(filename, sizeof(filename), "%s", DB_DUMP_FILE);
+	if ((db_dump = fopen_priv(filename, PG_BINARY_W)) == NULL)
+		pg_log(PG_FATAL, "Could not write to dump file \"%s\": %s\n", filename, getErrorText(errno));
+
 	current_output = globals_dump;
 
 	/* patterns used to prevent our own username from being recreated */

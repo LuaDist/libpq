@@ -58,7 +58,7 @@ SELECT [ ALL | DISTINCT [ ON ( <replaceable class="parameter">expression</replac
 
 <phrase>and <replaceable class="parameter">with_query</replaceable> is:</phrase>
 
-    <replaceable class="parameter">with_query_name</replaceable> [ ( <replaceable class="parameter">column_name</replaceable> [, ...] ) ] AS ( <replaceable class="parameter">select</replaceable> | <replaceable class="parameter">insert</replaceable> | <replaceable class="parameter">update</replaceable> | <replaceable class="parameter">delete</replaceable> )
+    <replaceable class="parameter">with_query_name</replaceable> [ ( <replaceable class="parameter">column_name</replaceable> [, ...] ) ] AS ( <replaceable class="parameter">select</replaceable> | <replaceable class="parameter">values</replaceable> | <replaceable class="parameter">insert</replaceable> | <replaceable class="parameter">update</replaceable> | <replaceable class="parameter">delete</replaceable> )
 
 TABLE [ ONLY ] <replaceable class="parameter">table_name</replaceable> [ * ]
 </synopsis>
@@ -208,7 +208,7 @@ TABLE [ ONLY ] <replaceable class="parameter">table_name</replaceable> [ * ]
     subqueries that can be referenced by name in the primary query.
     The subqueries effectively act as temporary tables or views
     for the duration of the primary query.
-    Each subquery can be a <command>SELECT</command>,
+    Each subquery can be a <command>SELECT</command>, <command>VALUES</command>,
     <command>INSERT</command>, <command>UPDATE</command> or
     <command>DELETE</command> statement.
     When writing a data-modifying statement (<command>INSERT</command>,
@@ -298,10 +298,12 @@ TABLE [ ONLY ] <replaceable class="parameter">table_name</replaceable> [ * ]
       <term><replaceable class="parameter">table_name</replaceable></term>
       <listitem>
        <para>
-        The name (optionally schema-qualified) of an existing table or
-        view.  If <literal>ONLY</> is specified, only that table is
-        scanned.  If <literal>ONLY</> is not specified, the table and
-        any descendant tables are scanned.
+        The name (optionally schema-qualified) of an existing table or view.
+        If <literal>ONLY</> is specified before the table name, only that
+        table is scanned.  If <literal>ONLY</> is not specified, the table
+        and all its descendant tables (if any) are scanned.  Optionally,
+        <literal>*</> can be specified after the table name to explicitly
+        indicate that descendant tables are included.
        </para>
       </listitem>
      </varlistentry>
@@ -758,8 +760,9 @@ UNBOUNDED FOLLOWING
     If you do not specify a column name, a name is chosen automatically
     by <productname>PostgreSQL</productname>.  If the column's expression
     is a simple column reference then the chosen name is the same as that
-    column's name; in more complex cases a generated name looking like
-    <literal>?column<replaceable>N</>?</literal> is usually chosen.
+    column's name.  In more complex cases a function or type name may be
+    used, or the system may fall back on a generated name such as
+    <literal>?column?</literal>.
    </para>
 
    <para>
@@ -1049,8 +1052,13 @@ SELECT name FROM distributors ORDER BY code;
    </para>
 
    <para>
-    Character-string data is sorted according to the locale-specific
-    collation order that was established when the database was created.
+    Character-string data is sorted according to the collation that applies
+    to the column being sorted.  That can be overridden at need by including
+    a <literal>COLLATE</> clause in the
+    <replaceable class="parameter">expression</replaceable>, for example
+    <literal>ORDER BY mycolumn COLLATE "en_US"</>.
+    For more information see <xref linkend="sql-syntax-collate-exprs"> and
+    <xref linkend="collation">.
    </para>
   </refsect2>
 
@@ -1063,7 +1071,8 @@ SELECT name FROM distributors ORDER BY code;
 <synopsis>
 LIMIT { <replaceable class="parameter">count</replaceable> | ALL }
 OFFSET <replaceable class="parameter">start</replaceable>
-</synopsis><replaceable class="parameter">count</replaceable> specifies the
+</synopsis>
+    <replaceable class="parameter">count</replaceable> specifies the
     maximum number of rows to return, while <replaceable
     class="parameter">start</replaceable> specifies the number of rows
     to skip before starting to return rows.  When both are specified,
@@ -1086,17 +1095,19 @@ OFFSET <replaceable class="parameter">start</replaceable>
 OFFSET <replaceable class="parameter">start</replaceable> { ROW | ROWS }
 FETCH { FIRST | NEXT } [ <replaceable class="parameter">count</replaceable> ] { ROW | ROWS } ONLY
 </synopsis>
-    According to the standard, the <literal>OFFSET</literal> clause must come
-    before the <literal>FETCH</literal> clause if both are present; but
-    <productname>PostgreSQL</> is laxer and allows either order.
+    In this syntax, to write anything except a simple integer constant for
+    <replaceable class="parameter">start</> or <replaceable
+    class="parameter">count</replaceable>, you must write parentheses
+    around it.
+    If <replaceable class="parameter">count</> is
+    omitted in a <literal>FETCH</> clause, it defaults to 1.
     <literal>ROW</literal>
     and <literal>ROWS</literal> as well as <literal>FIRST</literal>
     and <literal>NEXT</literal> are noise words that don't influence
-    the effects of these clauses.  In this syntax, when using expressions
-    other than simple constants for <replaceable class="parameter">start</>
-    or <replaceable class="parameter">count</replaceable>, parentheses will be
-    necessary in most cases.  If <replaceable class="parameter">count</> is
-    omitted in <literal>FETCH</>, it defaults to 1.
+    the effects of these clauses.
+    According to the standard, the <literal>OFFSET</literal> clause must come
+    before the <literal>FETCH</literal> clause if both are present; but
+    <productname>PostgreSQL</> is laxer and allows either order.
    </para>
 
    <para>
@@ -1280,7 +1291,8 @@ ROLLBACK TO s;
 
   <caution>
    <para>
-    It is possible for a <command>SELECT</> command using <literal>ORDER
+    It is possible for a <command>SELECT</> command running at the <literal>READ
+    COMMITTED</literal> transaction isolation level and using <literal>ORDER
     BY</literal> and <literal>FOR UPDATE/SHARE</literal> to return rows out of
     order.  This is because <literal>ORDER BY</> is applied first.
     The command sorts the result, but might then block trying to obtain a lock
@@ -1300,6 +1312,13 @@ SELECT * FROM (SELECT * FROM mytable FOR UPDATE) ss ORDER BY column1;
     <literal>LIMIT</> or other restrictions.  So this technique is recommended
     only if concurrent updates of the ordering columns are expected and a
     strictly sorted result is required.
+   </para>
+
+   <para>
+    At the <literal>REPEATABLE READ</literal> or <literal>SERIALIZABLE</literal>
+    transaction isolation level this would cause a serialization failure (with
+    a <literal>SQLSTATE</literal> of <literal>'40001'</literal>), so there is
+    no possibility of receiving rows out of order under these isolation levels.
    </para>
   </caution>
   </refsect2>
@@ -1582,15 +1601,24 @@ SELECT distributors.* WHERE distributors.name = 'Westward';
   </refsect2>
 
   <refsect2>
-   <title><literal>ONLY</literal> and Parentheses</title>
+   <title><literal>ONLY</literal> and Inheritance</title>
 
    <para>
-    The SQL standard requires parentheses around the table name
-    after <literal>ONLY</literal>, as in <literal>SELECT * FROM ONLY
-    (tab1), ONLY (tab2) WHERE ...</literal>.  PostgreSQL supports that
-    as well, but the parentheses are optional.  (This point applies
-    equally to all SQL commands supporting the <literal>ONLY</literal>
-    option.)
+    The SQL standard requires parentheses around the table name when
+    writing <literal>ONLY</literal>, for example <literal>SELECT * FROM ONLY
+    (tab1), ONLY (tab2) WHERE ...</literal>.  <productname>PostgreSQL</>
+    considers these parentheses to be optional.
+   </para>
+
+   <para>
+    <productname>PostgreSQL</> allows a trailing <literal>*</> to be written to
+    explicitly specify the non-<literal>ONLY</literal> behavior of including
+    child tables.  The standard does not allow this.
+   </para>
+
+   <para>
+    (These points apply equally to all SQL commands supporting the
+    <literal>ONLY</literal> option.)
    </para>
   </refsect2>
 

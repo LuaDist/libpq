@@ -25,7 +25,7 @@
  * specific parts are in the libpqwalreceiver module. It's loaded
  * dynamically to avoid linking the server with libpq.
  *
- * Portions Copyright (c) 2010-2011, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2010-2012, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -38,25 +38,22 @@
 #include <signal.h>
 #include <unistd.h>
 
-#include "access/transam.h"
 #include "access/xlog_internal.h"
 #include "libpq/pqsignal.h"
 #include "miscadmin.h"
 #include "replication/walprotocol.h"
 #include "replication/walreceiver.h"
+#include "replication/walsender.h"
 #include "storage/ipc.h"
 #include "storage/pmsignal.h"
 #include "storage/procarray.h"
-#include "utils/builtins.h"
 #include "utils/guc.h"
-#include "utils/memutils.h"
 #include "utils/ps_status.h"
 #include "utils/resowner.h"
+#include "utils/timestamp.h"
 
-/* Global variable to indicate if this process is a walreceiver process */
-bool		am_walreceiver;
 
-/* GUC variable */
+/* GUC variables */
 int			wal_receiver_status_interval;
 bool		hot_standby_feedback;
 
@@ -69,10 +66,12 @@ walrcv_disconnect_type walrcv_disconnect = NULL;
 #define NAPTIME_PER_CYCLE 100	/* max sleep time between cycles (100ms) */
 
 /*
- * These variables are used similarly to openLogFile/Id/Seg/Off,
- * but for walreceiver to write the XLOG.
+ * These variables are used similarly to openLogFile/SegNo/Off,
+ * but for walreceiver to write the XLOG. recvFileTLI is the TimeLineID
+ * corresponding the filename of recvFile.
  */
 static int	recvFile = -1;
+static TimeLineID	recvFileTLI = 0;
 static uint32 recvId = 0;
 static uint32 recvSeg = 0;
 static uint32 recvOff = 0;
@@ -125,6 +124,7 @@ static void XLogWalRcvWrite(char *buf, Size nbytes, XLogRecPtr recptr);
 static void XLogWalRcvFlush(bool dying);
 static void XLogWalRcvSendReply(void);
 static void XLogWalRcvSendHSFeedback(void);
+static void ProcessWalSndrMessage(XLogRecPtr walEnd, TimestampTz sendTime);
 
 /* Signal handlers */
 static void WalRcvSigHupHandler(SIGNAL_ARGS);
@@ -175,8 +175,6 @@ WalReceiverMain(void)
 	/* use volatile pointer to prevent code rearrangement */
 	volatile WalRcvData *walrcv = WalRcv;
 
-	am_walreceiver = true;
-
 	/*
 	 * WalRcv should be set up already (if we are a backend, we inherit this
 	 * by fork() or EXEC_BACKEND mechanism from the postmaster).
@@ -219,6 +217,10 @@ WalReceiverMain(void)
 	/* Fetch information required to start streaming */
 	strlcpy(conninfo, (char *) walrcv->conninfo, MAXCONNINFO);
 	startpoint = walrcv->receiveStart;
+
+	/* Initialise to a sanish value */
+	walrcv->lastMsgSendTime = walrcv->lastMsgReceiptTime = walrcv->latestWalEndTime = GetCurrentTimestamp();
+
 	SpinLockRelease(&walrcv->mutex);
 
 	/* Arrange to clean up at walreceiver exit */
@@ -276,6 +278,11 @@ WalReceiverMain(void)
 	walrcv_connect(conninfo, startpoint);
 	DisableWalRcvImmediateExit();
 
+	/* Initialize LogstreamResult, reply_message and feedback_message */
+	LogstreamResult.Write = LogstreamResult.Flush = GetXLogReplayRecPtr(NULL);
+	MemSet(&reply_message, 0, sizeof(reply_message));
+	MemSet(&feedback_message, 0, sizeof(feedback_message));
+
 	/* Loop until end-of-streaming or error */
 	for (;;)
 	{
@@ -287,7 +294,7 @@ WalReceiverMain(void)
 		 * Emergency bailout if postmaster has died.  This is to avoid the
 		 * necessity for manual cleanup of all postmaster children.
 		 */
-		if (!PostmasterIsAlive(true))
+		if (!PostmasterIsAlive())
 			exit(1);
 
 		/*
@@ -434,10 +441,26 @@ XLogWalRcvProcessMsg(unsigned char type, char *buf, Size len)
 							 errmsg_internal("invalid WAL message received from primary")));
 				/* memcpy is required here for alignment reasons */
 				memcpy(&msghdr, buf, sizeof(WalDataMessageHeader));
+
+				ProcessWalSndrMessage(msghdr.walEnd, msghdr.sendTime);
+
 				buf += sizeof(WalDataMessageHeader);
 				len -= sizeof(WalDataMessageHeader);
-
 				XLogWalRcvWrite(buf, len, msghdr.dataStart);
+				break;
+			}
+		case 'k':				/* Keepalive */
+			{
+				PrimaryKeepaliveMessage keepalive;
+
+				if (len != sizeof(PrimaryKeepaliveMessage))
+					ereport(ERROR,
+							(errcode(ERRCODE_PROTOCOL_VIOLATION),
+							 errmsg_internal("invalid keepalive message received from primary")));
+				/* memcpy is required here for alignment reasons */
+				memcpy(&keepalive, buf, sizeof(PrimaryKeepaliveMessage));
+
+				ProcessWalSndrMessage(keepalive.walEnd, keepalive.sendTime);
 				break;
 			}
 		default:
@@ -471,6 +494,8 @@ XLogWalRcvWrite(char *buf, Size nbytes, XLogRecPtr recptr)
 			 */
 			if (recvFile >= 0)
 			{
+				char		xlogfname[MAXFNAMELEN];
+
 				XLogWalRcvFlush(false);
 
 				/*
@@ -483,6 +508,13 @@ XLogWalRcvWrite(char *buf, Size nbytes, XLogRecPtr recptr)
 							(errcode_for_file_access(),
 						errmsg("could not close log file %u, segment %u: %m",
 							   recvId, recvSeg)));
+
+				/*
+				 * Create .done file forcibly to prevent the restored segment from
+				 * being archived again later.
+				 */
+				XLogFileName(xlogfname, recvFileTLI, recvId, recvSeg);
+				XLogArchiveForceDone(xlogfname);
 			}
 			recvFile = -1;
 
@@ -490,6 +522,7 @@ XLogWalRcvWrite(char *buf, Size nbytes, XLogRecPtr recptr)
 			XLByteToSeg(recptr, recvId, recvSeg);
 			use_existent = true;
 			recvFile = XLogFileInit(recvId, recvSeg, &use_existent, true);
+			recvFileTLI = ThisTimeLineID;
 			recvOff = 0;
 		}
 
@@ -568,8 +601,10 @@ XLogWalRcvFlush(bool dying)
 		}
 		SpinLockRelease(&walrcv->mutex);
 
-		/* Signal the startup process that new WAL has arrived */
+		/* Signal the startup process and walsender that new WAL has arrived */
 		WakeupRecovery();
+		if (AllowCascadeReplication())
+			WalSndWakeup();
 
 		/* Report XLOG streaming progress in PS display */
 		if (update_process_title)
@@ -629,7 +664,7 @@ XLogWalRcvSendReply(void)
 	/* Construct a new message */
 	reply_message.write = LogstreamResult.Write;
 	reply_message.flush = LogstreamResult.Flush;
-	reply_message.apply = GetXLogReplayRecPtr();
+	reply_message.apply = GetXLogReplayRecPtr(NULL);
 	reply_message.sendTime = now;
 
 	elog(DEBUG2, "sending write %X/%X flush %X/%X apply %X/%X",
@@ -709,4 +744,32 @@ XLogWalRcvSendHSFeedback(void)
 	buf[0] = 'h';
 	memcpy(&buf[1], &feedback_message, sizeof(StandbyHSFeedbackMessage));
 	walrcv_send(buf, sizeof(StandbyHSFeedbackMessage) + 1);
+}
+
+/*
+ * Keep track of important messages from primary.
+ */
+static void
+ProcessWalSndrMessage(XLogRecPtr walEnd, TimestampTz sendTime)
+{
+	/* use volatile pointer to prevent code rearrangement */
+	volatile WalRcvData *walrcv = WalRcv;
+
+	TimestampTz lastMsgReceiptTime = GetCurrentTimestamp();
+
+	/* Update shared-memory status */
+	SpinLockAcquire(&walrcv->mutex);
+	if (XLByteLT(walrcv->latestWalEnd, walEnd))
+		walrcv->latestWalEndTime = sendTime;
+	walrcv->latestWalEnd = walEnd;
+	walrcv->lastMsgSendTime = sendTime;
+	walrcv->lastMsgReceiptTime = lastMsgReceiptTime;
+	SpinLockRelease(&walrcv->mutex);
+
+	if (log_min_messages <= DEBUG2)
+		elog(DEBUG2, "sendtime %s receipttime %s replication apply delay %d ms transfer latency %d ms",
+			 timestamptz_to_str(sendTime),
+			 timestamptz_to_str(lastMsgReceiptTime),
+			 GetReplicationApplyDelay(),
+			 GetReplicationTransferLatency());
 }

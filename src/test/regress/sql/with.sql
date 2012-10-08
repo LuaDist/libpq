@@ -540,6 +540,111 @@ WITH RECURSIVE t(j) AS (
 SELECT * FROM t;
 
 --
+-- test WITH attached to intermediate-level set operation
+--
+
+WITH outermost(x) AS (
+  SELECT 1
+  UNION (WITH innermost as (SELECT 2)
+         SELECT * FROM innermost
+         UNION SELECT 3)
+)
+SELECT * FROM outermost;
+
+WITH outermost(x) AS (
+  SELECT 1
+  UNION (WITH innermost as (SELECT 2)
+         SELECT * FROM outermost  -- fail
+         UNION SELECT * FROM innermost)
+)
+SELECT * FROM outermost;
+
+WITH RECURSIVE outermost(x) AS (
+  SELECT 1
+  UNION (WITH innermost as (SELECT 2)
+         SELECT * FROM outermost
+         UNION SELECT * FROM innermost)
+)
+SELECT * FROM outermost;
+
+WITH RECURSIVE outermost(x) AS (
+  WITH innermost as (SELECT 2 FROM outermost) -- fail
+    SELECT * FROM innermost
+    UNION SELECT * from outermost
+)
+SELECT * FROM outermost;
+
+--
+-- This test will fail with the old implementation of PARAM_EXEC parameter
+-- assignment, because the "q1" Var passed down to A's targetlist subselect
+-- looks exactly like the "A.id" Var passed down to C's subselect, causing
+-- the old code to give them the same runtime PARAM_EXEC slot.  But the
+-- lifespans of the two parameters overlap, thanks to B also reading A.
+--
+
+with
+A as ( select q2 as id, (select q1) as x from int8_tbl ),
+B as ( select id, row_number() over (partition by id) as r from A ),
+C as ( select A.id, array(select B.id from B where B.id = A.id) from A )
+select * from C;
+
+--
+-- Test CTEs read in non-initialization orders
+--
+
+WITH RECURSIVE
+  tab(id_key,link) AS (VALUES (1,17), (2,17), (3,17), (4,17), (6,17), (5,17)),
+  iter (id_key, row_type, link) AS (
+      SELECT 0, 'base', 17
+    UNION ALL (
+      WITH remaining(id_key, row_type, link, min) AS (
+        SELECT tab.id_key, 'true'::text, iter.link, MIN(tab.id_key) OVER ()
+        FROM tab INNER JOIN iter USING (link)
+        WHERE tab.id_key > iter.id_key
+      ),
+      first_remaining AS (
+        SELECT id_key, row_type, link
+        FROM remaining
+        WHERE id_key=min
+      ),
+      effect AS (
+        SELECT tab.id_key, 'new'::text, tab.link
+        FROM first_remaining e INNER JOIN tab ON e.id_key=tab.id_key
+        WHERE e.row_type = 'false'
+      )
+      SELECT * FROM first_remaining
+      UNION ALL SELECT * FROM effect
+    )
+  )
+SELECT * FROM iter;
+
+WITH RECURSIVE
+  tab(id_key,link) AS (VALUES (1,17), (2,17), (3,17), (4,17), (6,17), (5,17)),
+  iter (id_key, row_type, link) AS (
+      SELECT 0, 'base', 17
+    UNION (
+      WITH remaining(id_key, row_type, link, min) AS (
+        SELECT tab.id_key, 'true'::text, iter.link, MIN(tab.id_key) OVER ()
+        FROM tab INNER JOIN iter USING (link)
+        WHERE tab.id_key > iter.id_key
+      ),
+      first_remaining AS (
+        SELECT id_key, row_type, link
+        FROM remaining
+        WHERE id_key=min
+      ),
+      effect AS (
+        SELECT tab.id_key, 'new'::text, tab.link
+        FROM first_remaining e INNER JOIN tab ON e.id_key=tab.id_key
+        WHERE e.row_type = 'false'
+      )
+      SELECT * FROM first_remaining
+      UNION ALL SELECT * FROM effect
+    )
+  )
+SELECT * FROM iter;
+
+--
 -- Data-modifying statements in WITH
 --
 
@@ -760,6 +865,42 @@ SELECT * FROM y;
 
 DROP TRIGGER y_trig ON y;
 DROP FUNCTION y_trigger();
+
+-- WITH attached to inherited UPDATE or DELETE
+
+CREATE TEMP TABLE parent ( id int, val text );
+CREATE TEMP TABLE child1 ( ) INHERITS ( parent );
+CREATE TEMP TABLE child2 ( ) INHERITS ( parent );
+
+INSERT INTO parent VALUES ( 1, 'p1' );
+INSERT INTO child1 VALUES ( 11, 'c11' ),( 12, 'c12' );
+INSERT INTO child2 VALUES ( 23, 'c21' ),( 24, 'c22' );
+
+WITH rcte AS ( SELECT sum(id) AS totalid FROM parent )
+UPDATE parent SET id = id + totalid FROM rcte;
+
+SELECT * FROM parent;
+
+WITH wcte AS ( INSERT INTO child1 VALUES ( 42, 'new' ) RETURNING id AS newid )
+UPDATE parent SET id = id + newid FROM wcte;
+
+SELECT * FROM parent;
+
+WITH rcte AS ( SELECT max(id) AS maxid FROM parent )
+DELETE FROM parent USING rcte WHERE id = maxid;
+
+SELECT * FROM parent;
+
+WITH wcte AS ( INSERT INTO child2 VALUES ( 42, 'new2' ) RETURNING id AS newid )
+DELETE FROM parent USING wcte WHERE id = newid;
+
+SELECT * FROM parent;
+
+-- check EXPLAIN VERBOSE for a wCTE with RETURNING
+
+EXPLAIN (VERBOSE, COSTS OFF)
+WITH wcte AS ( INSERT INTO int8_tbl VALUES ( 42, 47 ) RETURNING q2 )
+DELETE FROM a USING wcte WHERE aa = q2;
 
 -- error cases
 
