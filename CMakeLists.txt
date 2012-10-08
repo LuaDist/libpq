@@ -42,7 +42,7 @@ set ( SRC
   src/interfaces/libpq/wchar.c
 )
 
-if ( UNIX )
+if ( UNIX AND NOT APPLE )
   add_definitions ( -D_GNU_SOURCE )
   list ( APPEND SRC
     src/interfaces/libpq/strlcpy.c
