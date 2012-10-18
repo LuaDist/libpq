@@ -103,35 +103,35 @@
 
 /* Define to 1 if you have the declaration of `fdatasync', and to 0 if you
    don't. */
-#cmakedefine HAVE_DECL_FDATASYNC 1
+#cmakedefine HAVE_DECL_FDATASYNC @HAVE_DECL_FDATASYNC@
 
 /* Define to 1 if you have the declaration of `F_FULLFSYNC', and to 0 if you
    don't. */
-#cmakedefine HAVE_DECL_F_FULLFSYNC 1
+#cmakedefine HAVE_DECL_F_FULLFSYNC @HAVE_DECL_F_FULLFSYNC@
 
 /* Define to 1 if you have the declaration of `posix_fadvise', and to 0 if you
    don't. */
-#cmakedefine HAVE_DECL_POSIX_FADVISE 1
+#cmakedefine HAVE_DECL_POSIX_FADVISE @HAVE_DECL_POSIX_FADVISE@
 
 /* Define to 1 if you have the declaration of `snprintf', and to 0 if you
    don't. */
-#cmakedefine HAVE_DECL_SNPRINTF 1
+#cmakedefine HAVE_DECL_SNPRINTF @HAVE_DECL_SNPRINTF@
 
 /* Define to 1 if you have the declaration of `strlcat', and to 0 if you
    don't. */
-#cmakedefine HAVE_DECL_STRLCAT 1
+#cmakedefine HAVE_DECL_STRLCAT @HAVE_DECL_STRLCAT@
 
 /* Define to 1 if you have the declaration of `strlcpy', and to 0 if you
    don't. */
-#cmakedefine HAVE_DECL_STRLCPY 1
+#cmakedefine HAVE_DECL_STRLCPY @HAVE_DECL_STRLCPY@
 
 /* Define to 1 if you have the declaration of `sys_siglist', and to 0 if you
    don't. */
-#cmakedefine HAVE_DECL_SYS_SIGLIST 1
+#cmakedefine HAVE_DECL_SYS_SIGLIST @HAVE_DECL_SYS_SIGLIST@
 
 /* Define to 1 if you have the declaration of `vsnprintf', and to 0 if you
    don't. */
-#cmakedefine HAVE_DECL_VSNPRINTF 1
+#cmakedefine HAVE_DECL_VSNPRINTF @HAVE_DECL_VSNPRINTF@
 
 /* Define to 1 if you have the <dld.h> header file. */
 #cmakedefine HAVE_DLD_H 1
@@ -789,7 +789,7 @@
 # endif
 #else
 # ifndef WORDS_BIGENDIAN
-#  undef WORDS_BIGENDIAN
+#cmakedefine WORDS_BIGENDIAN
 # endif
 #endif
 
@@ -815,25 +815,25 @@
 #cmakedefine _LARGE_FILES 1
 
 /* Define to empty if `const' does not conform to ANSI C. */
-#undef const 
+#cmakedefine const 
 
 /* Define to `__inline__' or `__inline' if that's what the C compiler
    calls it, or to nothing if 'inline' is not supported under any name.  */
 #ifndef __cplusplus
-#undef inline
+#cmakedefine inline
 #endif
 
 /* Define to the type of a signed integer type wide enough to hold a pointer,
    if such a type exists, and if the system does not define it. */
-#undef intptr_t
+#cmakedefine intptr_t
 
 /* Define to empty if the C compiler does not understand signed types. */
-#undef signed
+#cmakedefine signed
 
 /* Define to the type of an unsigned integer type wide enough to hold a
    pointer, if such a type exists, and if the system does not define it. */
-#undef uintptr_t
+#cmakedefine uintptr_t
 
 /* Define to empty if the keyword `volatile' does not work. Warning: valid
    code using `volatile' can become incorrect without. Disable with care. */
-#undef volatile
+#cmakedefine volatile

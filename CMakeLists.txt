@@ -12,16 +12,7 @@ include ( cmake/dist.cmake )
 include_directories ( ${CMAKE_CURRENT_BINARY_DIR} src/include  )
 
 # Configuration
-configure_file ( ${CMAKE_CURRENT_SOURCE_DIR}/src/port/pg_config_paths.h.in ${CMAKE_CURRENT_SOURCE_DIR}/src/port/pg_config_paths.h )
-
-#set ( PG_VERSION_NUM 90201 )
-#set ( ACCEPT_TYPE_ARG1 "unsigned int" )
-#set ( ACCEPT_TYPE_ARG2 "struct sockaddr" )
-#set ( ACCEPT_TYPE_ARG3 "int" )
-#set ( DEF_PGPORT 5432 )
-#set ( DEF_PGPORT_STR "${DEF_PGPORT}" )
-#set ( MEMSET_LOOP_LIMIT 512 )
-#set ( MAXIMUM_ALIGNOF 8 )
+configure_file ( ${CMAKE_CURRENT_SOURCE_DIR}/src/include/pg_config_paths.h.in ${CMAKE_CURRENT_SOURCE_DIR}/src/include/pg_config_paths.h )
 
 # libpq sources
 set ( SRC 
@@ -45,7 +36,6 @@ if ( WIN32 )
 
   add_definitions ( -DFRONTEND -DUNSAFE_STAT_OK -DSO_MAJOR_VERSION=5 -DEXEC_BACKEND -DBUILDING_DLL )
   include_directories ( src/include/port src/include/port/win32 src/port )
-  # OS specific config
   configure_file ( ${CMAKE_CURRENT_SOURCE_DIR}/src/include/port/win32.h ${CMAKE_CURRENT_SOURCE_DIR}/src/include/pg_config_os.h )
   # On windows use port sources
   list ( APPEND SRC
@@ -72,10 +62,11 @@ if ( WIN32 )
    )
   list ( APPEND LIBS -lshfolder -lwsock32 -lws2_32 -lsecur32 )
 endif ()
-
-if ( UNIX  )  
+  
+if ( UNIX  )
   # Generate configured header
   include ( configure )
+  
   configure_file ( ${CMAKE_CURRENT_SOURCE_DIR}/src/include/pg_config.h.in ${CMAKE_CURRENT_SOURCE_DIR}/src/include/pg_config.h )
 
   add_definitions ( -D_REENTRANT -D_THREAD_SAFE -D_POSIX_PTHREAD_SEMANTICS -DFRONTEND -DUNSAFE_STAT_OK )
@@ -106,6 +97,8 @@ if ( UNIX  )
       src/interfaces/libpq/strlcpy.c
       src/interfaces/libpq/getpeereid.c
     )
+  else ()
+      configure_file ( ${CMAKE_CURRENT_SOURCE_DIR}/src/include/port/darwin.h ${CMAKE_CURRENT_SOURCE_DIR}/src/include/pg_config_os.h )
   endif ()
 endif ()
 
