@@ -109,3 +109,10 @@ target_link_libraries ( pq ${LIBS} )
 # Install the lib and headers
 install_library ( pq )
 install_header ( src/include/ INTO pgsql )
+install_header ( 
+  src/interfaces/libpq/libpq-fe.h 
+  src/interfaces/libpq/libpq-events.h 
+  src/interfaces/libpq/libpq-int.h 
+  src/interfaces/libpq/pqexpbuffer.h
+  INTO pgsql 
+)
